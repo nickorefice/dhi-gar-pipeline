@@ -1,0 +1,114 @@
+{
+  "_comment": [
+    "Classification table for OCI referrer descriptors. The verify gate does not",
+    "hardcode artifact types in shell -- it matches descriptors against this table,",
+    "so tightening the matchers after observing a real DHI repo is a data change.",
+    "",
+    "Two conventions are covered, because DHI/Scout may use either:",
+    "  1. Direct artifact referrers -- descriptor.artifactType is the document type",
+    "     (e.g. application/spdx+json).",
+    "  2. BuildKit/Docker attestation manifests -- descriptor.artifactType is a",
+    "     generic in-toto or Docker attestation type, and the real predicate lives",
+    "     in an annotation (in-toto.io/predicate-type) either on the descriptor or",
+    "     on the layers of the referenced manifest. scripts/90-inspect-referrers.sh",
+    "     resolves that second level and reports what is actually there.",
+    "",
+    "predicateTypes match by PREFIX, so versioned URIs such as",
+    "https://slsa.dev/provenance/v1 match the entry https://slsa.dev/provenance.",
+    "",
+    "requiredGroup drives the gate: a group is satisfied if ANY class in it is",
+    "present. Phase 3 requires groups sbom + provenance + vex."
+  ],
+  "requiredGroups": ["sbom", "provenance", "vex"],
+  "classes": [
+    {
+      "id": "sbom-spdx",
+      "label": "SPDX SBOM",
+      "requiredGroup": "sbom",
+      "evidenceFilename": "sbom.spdx.json",
+      "artifactTypes": [
+        "application/spdx+json",
+        "application/vnd.spdx+json",
+        "text/spdx+json"
+      ],
+      "predicateTypes": [
+        "https://spdx.dev/Document"
+      ]
+    },
+    {
+      "id": "sbom-cyclonedx",
+      "label": "CycloneDX SBOM",
+      "requiredGroup": "sbom",
+      "evidenceFilename": "sbom.cyclonedx.json",
+      "artifactTypes": [
+        "application/vnd.cyclonedx+json",
+        "application/vnd.cyclonedx"
+      ],
+      "predicateTypes": [
+        "https://cyclonedx.org/bom",
+        "https://cyclonedx.org/specification"
+      ]
+    },
+    {
+      "id": "provenance-slsa",
+      "label": "SLSA provenance",
+      "requiredGroup": "provenance",
+      "evidenceFilename": "provenance.slsa.json",
+      "artifactTypes": [
+        "application/vnd.slsa.provenance+json"
+      ],
+      "predicateTypes": [
+        "https://slsa.dev/provenance",
+        "https://slsa.dev/spec"
+      ]
+    },
+    {
+      "id": "vex-openvex",
+      "label": "OpenVEX",
+      "requiredGroup": "vex",
+      "evidenceFilename": "vex.openvex.json",
+      "artifactTypes": [
+        "application/vnd.openvex+json",
+        "application/openvex+json"
+      ],
+      "predicateTypes": [
+        "https://openvex.dev/ns"
+      ]
+    },
+    {
+      "id": "vuln-report",
+      "label": "Vulnerability report",
+      "requiredGroup": null,
+      "evidenceFilename": "vulnerability-report.json",
+      "artifactTypes": [
+        "application/vnd.docker.scout.vulnerability-report+json"
+      ],
+      "predicateTypes": [
+        "https://in-toto.io/attestation/vulns"
+      ]
+    },
+    {
+      "id": "signature-cosign",
+      "label": "Cosign signature",
+      "requiredGroup": null,
+      "evidenceFilename": null,
+      "artifactTypes": [
+        "application/vnd.dev.cosign.artifact.sig.v1+json",
+        "application/vnd.dev.sigstore.bundle+json;version=0.1",
+        "application/vnd.dev.sigstore.bundle.v0.3+json"
+      ],
+      "predicateTypes": []
+    },
+    {
+      "id": "attestation-manifest-generic",
+      "label": "Generic in-toto / Docker attestation manifest (predicate needs deep inspection)",
+      "requiredGroup": null,
+      "evidenceFilename": null,
+      "artifactTypes": [
+        "application/vnd.in-toto+json",
+        "application/vnd.docker.attestation.manifest.v1+json"
+      ],
+      "predicateTypes": []
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "_fixture": "Convention 1: each referrer's artifactType IS the document type. Expect sbom+provenance+vex satisfied, 1 unclassified.",
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/spdx+json",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "size": 8341,
+      "annotations": { "org.opencontainers.image.title": "sbom.spdx.json" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.cyclonedx+json",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 7712
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.in-toto+json",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "size": 2044,
+      "annotations": { "in-toto.io/predicate-type": "https://slsa.dev/provenance/v1" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.openvex+json",
+      "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "size": 1188
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.dev.cosign.artifact.sig.v1+json",
+      "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "size": 512
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.example.something-new+json",
+      "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "size": 99
+    }
+  ]
+}

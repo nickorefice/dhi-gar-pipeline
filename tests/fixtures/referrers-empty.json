@@ -1,0 +1,6 @@
+{
+  "_fixture": "Empty referrers set -- what you get when --referrers-src was wrong, the PAT cannot read the attestation registry, or the copy dropped referrers. All three groups must report missing rather than the classifier crashing.",
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": []
+}

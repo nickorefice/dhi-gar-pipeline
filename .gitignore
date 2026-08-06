@@ -1,0 +1,26 @@
+# Local, non-committed configuration (contains project IDs / org names, and is
+# the file every script sources). Copy config.env.example -> config.env.
+config.env
+
+# Pipeline run output: run manifests, gate reports, downloaded attestation blobs.
+# These are reproducible from the registry; the registry is the source of truth.
+out/
+
+# Terraform (local state for the POC -- see README for why, and why a real
+# deployment must use a GCS backend instead).
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+
+# Never commit credentials. Listed defensively: nothing in this repo should ever
+# write these, and CI authenticates via Workload Identity Federation instead.
+*-key.json
+*_key.json
+application_default_credentials.json
+sa-key*.json
+
+# macOS
+.DS_Store

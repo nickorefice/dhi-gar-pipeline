@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+# GCP project that will hold the GAR repos, evidence bucket, and WIF pool.
+project_id = "REPLACE_ME"
+
+# GitHub account/org owning this repository. Combined with github_repo, this is
+# the ONLY repository allowed to impersonate the pipeline service account --
+# enforced twice, in the provider's attribute_condition and in the IAM binding.
+github_owner = "REPLACE_ME"
+
+# Defaults below are fine for the POC; override only if you need to.
+# gar_location       = "us-central1"
+# github_repo        = "dhi-gar-pipeline"
+# quarantine_repo_id = "dhi-quarantine"
+# prod_repo_id       = "dhi-prod"
+# service_account_id = "dhi-pipeline"
+# evidence_bucket_name = ""   # defaults to <project_id>-dhi-evidence

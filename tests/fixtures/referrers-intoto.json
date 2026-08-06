@@ -1,0 +1,41 @@
+{
+  "_fixture": "Convention 2: BuildKit/Docker style -- every referrer shares a generic artifactType and the real document type is only in the in-toto.io/predicate-type annotation. Expect the same three groups satisfied via predicate matching, proving the classifier is not artifactType-dependent.",
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 9001,
+      "annotations": { "in-toto.io/predicate-type": "https://spdx.dev/Document" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 3120,
+      "annotations": { "in-toto.io/predicate-type": "https://slsa.dev/provenance/v0.2" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 1450,
+      "annotations": { "in-toto.io/predicate-type": "https://openvex.dev/ns/v0.2.0" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "size": 2600,
+      "annotations": { "in-toto.io/predicate-type": "https://in-toto.io/attestation/vulns/v0.1" }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "artifactType": "application/vnd.docker.attestation.manifest.v1+json",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "size": 700
+    }
+  ]
+}
