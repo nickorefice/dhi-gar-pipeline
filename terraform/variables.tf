@@ -80,8 +80,8 @@ variable "labels" {
   description = "Labels applied to every resource that supports them."
   type        = map(string)
   default = {
-    project   = "dhi-gar-pipeline"
+    project    = "dhi-gar-pipeline"
     managed-by = "terraform"
-    purpose   = "poc"
+    purpose    = "poc"
   }
 }

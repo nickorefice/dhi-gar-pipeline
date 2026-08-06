@@ -138,20 +138,49 @@ gar_digest_ref() { printf '%s@%s' "$(gar_repo_path "$1")" "$2"; }
 # --------------------------------------------------------------------------
 # Registry auth
 # --------------------------------------------------------------------------
+# TWO credential stores have to be populated, not one.
+#
+# `regctl registry login` writes to ~/.regctl/config.json. It does NOT write to
+# ~/.docker/config.json. Trivy and `docker scout` read Docker's store. So a
+# regctl-only login leaves those two unauthenticated, and the resulting failure
+# looks like a registry permissions problem rather than a missing credential --
+# verified by inspecting both files after a successful regctl login.
+#
+# `docker login` is therefore not redundant. Where the docker CLI is absent we
+# carry on: regctl is what the copy and referrer operations actually need, and
+# Trivy accepts credentials by environment variable as a fallback.
+_login_both() { # _login_both <host> <user> <secret>
+  local host="$1" user="$2" secret="$3"
+
+  printf '%s' "$secret" | regctl registry login "$host" -u "$user" --pass-stdin \
+    || return 1
+
+  if command -v docker >/dev/null 2>&1; then
+    if ! printf '%s' "$secret" | docker login "$host" -u "$user" --password-stdin >/dev/null 2>&1; then
+      warn "docker login failed for $host -- regctl is authenticated, but Trivy and"
+      warn "docker scout read Docker's credential store and may not authenticate"
+    fi
+  else
+    warn "docker CLI absent -- only regctl is authenticated for $host"
+  fi
+  return 0
+}
+
 # One Docker Hub PAT authenticates both docker.io and registry.scout.docker.com.
-# regclient shares Docker's ~/.docker/config.json credential store, so a regctl
-# login is also visible to `docker scout`.
 login_dockerhub() {
   require_vars DOCKERHUB_USERNAME
   [[ -n "${DOCKERHUB_PAT:-}" ]] || die "DOCKERHUB_PAT is not set (export it; never commit it)"
 
   local host
   for host in docker.io "$SCOUT_REGISTRY"; do
-    log "auth: regctl login $host as $DOCKERHUB_USERNAME"
-    printf '%s' "$DOCKERHUB_PAT" \
-      | regctl registry login "$host" -u "$DOCKERHUB_USERNAME" --pass-stdin \
+    log "auth: login $host as $DOCKERHUB_USERNAME"
+    _login_both "$host" "$DOCKERHUB_USERNAME" "$DOCKERHUB_PAT" \
       || die "login failed for $host -- for $SCOUT_REGISTRY confirm the PAT can read the org's Hardened Images"
   done
+
+  # Trivy's fallback path, so a scan still authenticates if Docker's store is
+  # unavailable (no docker CLI, or a credential helper we cannot write to).
+  export TRIVY_USERNAME="$DOCKERHUB_USERNAME" TRIVY_PASSWORD="$DOCKERHUB_PAT"
 }
 
 # GAR takes a short-lived OAuth token as the password, with the fixed username
@@ -172,9 +201,14 @@ login_gar() {
   fi
   [[ -n "$token" ]] || die "GCP access token was empty"
 
-  printf '%s' "$token" \
-    | regctl registry login "$GAR_HOST" -u oauth2accesstoken --pass-stdin \
-    || die "regctl login failed for $GAR_HOST"
+  # Both stores, for the same reason as login_dockerhub -- Trivy and docker scout
+  # read Docker's store, regctl reads its own.
+  _login_both "$GAR_HOST" oauth2accesstoken "$token" \
+    || die "login failed for $GAR_HOST"
+
+  # GAR access tokens are short-lived (~1h). Recorded so a stage that fails an
+  # hour into a run has an obvious first thing to check.
+  log "auth: GAR token is short-lived; re-run login_gar if a long run starts failing with 401"
 }
 
 # --------------------------------------------------------------------------
