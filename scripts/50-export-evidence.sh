@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+#
+# 50-export-evidence.sh -- write the evidence bundle to the evidence bucket.
+#
+# READ THIS BEFORE TRUSTING ANYTHING IN THE BUCKET:
+#
+# These are DERIVED COPIES, for audit and GRC consumption. They are ordinary JSON
+# files in a bucket; nothing about them is cryptographically bound to the image.
+# Verification is only meaningful against the registry referrers, where the
+# attestations remain attached to the image digest. If the bucket and the registry
+# ever disagree, the registry is right.
+#
+# The bundle exists because auditors need a stable, greppable, permission-scoped
+# artifact store -- not because it is a source of truth. In the customer's real
+# deployment this step writes to SharePoint via Microsoft Graph with an identical
+# folder layout (see docs/customer-adaptation.md).
+#
+# Runs on BOTH paths. A blocked promotion must still leave evidence -- "we caught
+# this and stopped" is exactly what an auditor needs to see, and a gate that
+# fails silently into an empty bucket is indistinguishable from a gate that never ran.
+#
+#   REPO=dhi-node TAG=22 ./scripts/50-export-evidence.sh
+#
+# Env:
+#   DRY_RUN=1   assemble the bundle locally, skip the upload
+
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
+need_tool regctl jq gcloud
+require_vars REPO TAG GCP_PROJECT_ID EVIDENCE_BUCKET
+load_manifest
+
+# ---------------------------------------------------------------------------
+# Which digest is this bundle about?
+#
+# A promoted image is described from prod. A blocked one is described from
+# quarantine, because that is where it actually is -- reporting a prod location
+# for an image that never reached prod would be a lie in the audit record.
+# ---------------------------------------------------------------------------
+PROMOTED="$(jq -r '.stages.promote.status // "not-run"' "$RUN_MANIFEST")"
+VERIFY_STATUS="$(jq -r '.gates.verify.status // "not-run"' "$RUN_MANIFEST")"
+SCAN_STATUS="$(jq -r '.gates.scan.status // "not-run"' "$RUN_MANIFEST")"
+
+if [[ "$PROMOTED" == "pass" ]]; then
+  OUTCOME="promoted"
+  SRC_REPO="$(gar_repo_path prod)"
+  LOCATION="$(jq -r '.targets.prod.digestRef' "$RUN_MANIFEST")"
+else
+  OUTCOME="blocked"
+  SRC_REPO="$(gar_repo_path quarantine)"
+  LOCATION="$(jq -r '.targets.quarantine.digestRef // empty' "$RUN_MANIFEST")"
+fi
+
+DEST="gs://$EVIDENCE_BUCKET/$REPO/$INDEX_DIGEST"
+BUNDLE="$RUN_DIR/evidence"
+rm -rf "$BUNDLE"; mkdir -p "$BUNDLE"
+
+step "50 export evidence: $OUTCOME"
+log "digest      : $INDEX_DIGEST"
+log "source repo : $SRC_REPO"
+log "destination : $DEST"
+
+if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
+  login_gar
+else
+  log "auth: SKIP_LOGIN=1, reusing existing credentials"
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Attestation payloads, pulled from the registry.
+#
+# Written EXACTLY as the registry holds them, without unwrapping in-toto
+# Statements. The Statement is the artifact that binds the predicate to a subject
+# digest; stripping it to make the file prettier would discard the very thing that
+# makes the evidence traceable. Whether each file is wrapped is recorded in
+# manifest.json so a consumer knows what it is parsing.
+# ---------------------------------------------------------------------------
+step "50a download attestations"
+
+INVENTORY="$RUN_DIR/inventory-${OUTCOME/promoted/prod}.json"
+[[ -f "$INVENTORY" ]] || INVENTORY="$RUN_DIR/inventory-prod.json"
+[[ -f "$INVENTORY" ]] || INVENTORY="$RUN_DIR/inventory-quarantine.json"
+if [[ ! -f "$INVENTORY" ]]; then
+  log "no cached inventory; querying referrers now"
+  REF="$RUN_DIR/referrers-evidence.json"
+  fetch_referrers "$SRC_REPO@$INDEX_DIGEST" "" >"$REF" 2>/dev/null || printf '{"manifests":[]}' >"$REF"
+  INVENTORY="$RUN_DIR/inventory-evidence.json"
+  classify_referrers_deep "$REF" "$SRC_REPO" >"$INVENTORY"
+fi
+
+FILES_JSON='[]'
+declare -A CLASS_SEEN=()
+
+while IFS=$'\t' read -r digest class filename; do
+  [[ -n "$digest" ]] || continue
+  [[ "$filename" == "null" || -z "$filename" ]] && continue
+
+  # Number repeats rather than overwriting: multiple VEX documents are normal and
+  # silently clobbering all but the last would misrepresent the evidence.
+  count="${CLASS_SEEN[$class]:-0}"; count=$((count + 1)); CLASS_SEEN[$class]=$count
+  if (( count > 1 )); then
+    out="$BUNDLE/${filename%.json}.$(printf '%02d' "$count").json"
+  else
+    out="$BUNDLE/$filename"
+  fi
+
+  if ! regctl artifact get "$SRC_REPO@$digest" >"$out" 2>/dev/null; then
+    warn "could not download $class (${digest:0:19}...) -- recorded as missing"
+    rm -f "$out"
+    FILES_JSON="$(jq -c --arg c "$class" --arg d "$digest" \
+      '. + [{class: $c, digest: $d, file: null, error: "download failed"}]' <<<"$FILES_JSON")"
+    continue
+  fi
+
+  wrapped=false
+  jq -e 'type == "object" and has("predicateType") and has("predicate")' >/dev/null 2>&1 <"$out" && wrapped=true
+  sha="$(sha256sum "$out" | cut -d' ' -f1)"
+  log "  ${out##*/}  ($(wc -c <"$out") bytes, in-toto wrapped: $wrapped)"
+
+  FILES_JSON="$(jq -c --arg c "$class" --arg d "$digest" --arg f "${out##*/}" \
+    --argjson w "$wrapped" --arg sha "$sha" \
+    '. + [{class: $c, referrerDigest: $d, file: $f, inTotoStatement: $w, sha256: $sha}]' <<<"$FILES_JSON")"
+done < <(jq -r '.artifacts[] | select(.evidenceFilename != null)
+                | [.digest, .class, .evidenceFilename] | @tsv' "$INVENTORY" 2>/dev/null || true)
+
+log "attestation files: $(jq -r 'length' <<<"$FILES_JSON")"
+
+# ---------------------------------------------------------------------------
+# 2. Gate reports, copied verbatim.
+# ---------------------------------------------------------------------------
+step "50b collect gate reports"
+for r in verify-report.json verify-report-prod.json scan-report.json; do
+  if [[ -f "$RUN_DIR/$r" ]]; then cp "$RUN_DIR/$r" "$BUNDLE/$r"; log "  $r"; fi
+done
+if [[ -f "$RUN_DIR/scout-compare.txt" ]]; then
+  cp "$RUN_DIR/scout-compare.txt" "$BUNDLE/scout-compare.txt"; log "  scout-compare.txt"
+fi
+
+# A blocked run gets an explicit, top-level statement of why. An auditor should not
+# have to infer a rejection by noticing which file is absent.
+if [[ "$OUTCOME" == "blocked" ]]; then
+  jq -n --arg at "$(_ts)" --arg digest "$INDEX_DIGEST" \
+     --arg verify "$VERIFY_STATUS" --arg scan "$SCAN_STATUS" \
+     --arg location "$LOCATION" \
+     '{ outcome: "blocked",
+        at: $at,
+        digest: $digest,
+        gates: { verify: $verify, scan: $scan },
+        imageLocation: $location,
+        statement: "This image did NOT pass the promotion gates and was not published to the production registry. It remains in quarantine.",
+        reason: (if $verify != "pass" then "attestation verification failed" else "vulnerability scan gate failed" end) }' \
+     >"$BUNDLE/failure-report.json"
+  log "  failure-report.json"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Bundle manifest -- the index an auditor reads first.
+# ---------------------------------------------------------------------------
+step "50c write bundle manifest"
+jq -n \
+  --slurpfile run "$RUN_MANIFEST" \
+  --slurpfile inv "$INVENTORY" \
+  --argjson files "$FILES_JSON" \
+  --arg outcome "$OUTCOME" \
+  --arg at "$(_ts)" \
+  --arg location "$LOCATION" \
+  --arg dest "$DEST" \
+  --arg verify "$VERIFY_STATUS" \
+  --arg scan "$SCAN_STATUS" \
+  '{
+     schemaVersion: 1,
+     generatedAt: $at,
+     disclaimer: "DERIVED COPIES for audit/GRC consumption. Nothing here is cryptographically bound to the image. Verification is only meaningful against the OCI referrers in the registry; if this bundle and the registry disagree, the registry is authoritative.",
+     outcome: $outcome,
+     image: {
+       sourceRef: $run[0].source.ref,
+       sourceRegistry: $run[0].source.registry,
+       digest: $run[0].source.indexDigest,
+       platform: $run[0].source.platform,
+       platformDigest: $run[0].source.platformDigest,
+       platformsAvailable: $run[0].source.platformsAvailable,
+       attestationSource: $run[0].attestationSource.ref,
+       currentLocation: $location
+     },
+     run: $run[0].run,
+     gates: { verify: $verify, scan: $scan, details: $run[0].gates },
+     stages: $run[0].stages,
+     attestations: {
+       total: $inv[0].total,
+       groupsPresent: $inv[0].groupsPresent,
+       groupsMissing: $inv[0].groupsMissing,
+       deepResolvedCount: $inv[0].deepResolvedCount,
+       inventory: $inv[0].artifacts
+     },
+     files: $files,
+     evidenceLocation: $dest
+   }' >"$BUNDLE/manifest.json"
+
+log "bundle contents:"
+(cd "$BUNDLE" && ls -la | tail -n +2 | awk '{printf "    %-34s %8s\n", $NF, $5}') >&2
+
+# ---------------------------------------------------------------------------
+# 4. Upload
+# ---------------------------------------------------------------------------
+step "50d upload to $DEST"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  warn "DRY_RUN=1 -- bundle assembled at ${BUNDLE#"$REPO_ROOT"/}, not uploaded"
+else
+  if ! gcloud storage cp --recursive "$BUNDLE"/* "$DEST/" 2>&1 | sed 's/^/    /' >&2; then
+    die "upload to $DEST failed -- bundle is intact locally at $BUNDLE"
+  fi
+  log "verifying what landed:"
+  gcloud storage ls -l "$DEST/" 2>&1 | sed 's/^/    /' >&2
+
+  # shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
+  manifest_set '.stages.evidence = {status: "pass", at: $at, location: $loc}' \
+    --arg at "$(_ts)" --arg loc "$DEST"
+fi
+
+summary "### Evidence exported"
+summary ""
+summary "| | |"
+summary "|---|---|"
+summary "| Outcome | **$OUTCOME** |"
+summary "| Digest | \`$INDEX_DIGEST\` |"
+summary "| Location | \`$DEST\` |"
+summary "| Attestation files | $(jq -r 'length' <<<"$FILES_JSON") |"
+summary ""
+summary "_Derived copies for audit. Verification is only meaningful against the registry referrers._"
+
+step "50 export evidence: OK ($OUTCOME)"
+log "$DEST"

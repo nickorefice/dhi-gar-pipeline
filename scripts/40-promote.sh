@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# 40-promote.sh -- copy quarantine -> prod, but only if both gates passed.
+#
+# The gate check reads the run manifest rather than trusting that the caller ran
+# the stages in order. `make promote` on its own, a re-run of a single CI step, or
+# a hand-typed invocation all have to be unable to promote an image whose gates
+# did not pass -- otherwise "quarantine" is a naming convention rather than a
+# boundary.
+#
+# Promotion is a REGISTRY-TO-REGISTRY COPY of the same digest, with referrers.
+# Nothing is rebuilt, re-tagged into a new digest, or re-signed. The bytes in prod
+# are bit-identical to the bytes the gates inspected, which is the only reason the
+# gate results mean anything about what is deployable.
+#
+#   REPO=dhi-node TAG=22 ./scripts/40-promote.sh
+#
+# Env:
+#   FORCE_PROMOTE=1   bypass the gate check. Refuses unless ALLOW_UNSAFE=1 too,
+#                     and stamps the run manifest so the bypass is on the record.
+
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
+need_tool regctl jq
+require_vars REPO TAG GCP_PROJECT_ID
+load_manifest
+
+QREPO="$(gar_repo_path quarantine)"
+PREPO="$(gar_repo_path prod)"
+SRC_DIGEST_REF="$QREPO@$INDEX_DIGEST"
+DST_TAG_REF="$(gar_ref prod)"
+
+step "40 promote: $SRC_DIGEST_REF -> $DST_TAG_REF"
+log "digest (pinned by stage 00): $INDEX_DIGEST"
+
+# ---------------------------------------------------------------------------
+# Gate check -- read from the run manifest, not from assumed ordering.
+# ---------------------------------------------------------------------------
+step "40a gate check"
+VERIFY_STATUS="$(jq -r '.gates.verify.status // "not-run"' "$RUN_MANIFEST")"
+SCAN_STATUS="$(jq -r '.gates.scan.status // "not-run"' "$RUN_MANIFEST")"
+log "verify gate: $VERIFY_STATUS"
+log "scan gate  : $SCAN_STATUS"
+
+GATES_OK=0
+[[ "$VERIFY_STATUS" == "pass" && "$SCAN_STATUS" == "pass" ]] && GATES_OK=1
+
+if (( ! GATES_OK )); then
+  if [[ "${FORCE_PROMOTE:-0}" == "1" && "${ALLOW_UNSAFE:-0}" == "1" ]]; then
+    warn "FORCE_PROMOTE with ALLOW_UNSAFE: promoting despite verify=$VERIFY_STATUS scan=$SCAN_STATUS"
+    warn "this is recorded in the run manifest and the evidence bundle"
+  else
+    bad "gates did not pass -- refusing to promote"
+    summary "### ❌ Promotion blocked"
+    summary ""
+    summary "| Gate | Status |"
+    summary "|---|---|"
+    summary "| Verify | $VERIFY_STATUS |"
+    summary "| Scan | $SCAN_STATUS |"
+    summary ""
+    summary "\`$INDEX_DIGEST\` stays in **quarantine** and was not promoted."
+    die "verify=$VERIFY_STATUS scan=$SCAN_STATUS -- image stays in quarantine (override: FORCE_PROMOTE=1 ALLOW_UNSAFE=1)"
+  fi
+fi
+ok "both gates passed"
+
+if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
+  login_gar
+else
+  log "auth: SKIP_LOGIN=1, reusing existing credentials"
+fi
+
+# ---------------------------------------------------------------------------
+# The copy. Both referrer endpoints are inside GAR now -- the Hub/Scout split
+# was resolved during sync, so this is a same-registry copy and GAR can mount
+# the layers rather than re-uploading them.
+# ---------------------------------------------------------------------------
+step "40b copy quarantine -> prod (with referrers)"
+COPY_ARGS=(
+  "$SRC_DIGEST_REF"
+  "$DST_TAG_REF"
+  --referrers
+  --referrers-src "$QREPO"
+  --referrers-tgt "$PREPO"
+  --force-recursive
+  --digest-tags
+)
+log "regctl image copy ${COPY_ARGS[*]}"
+COPY_LOG="$RUN_DIR/promote-copy.log"
+if ! regctl image copy -v info "${COPY_ARGS[@]}" >"$COPY_LOG" 2>&1; then
+  err "regctl image copy FAILED -- full output:"
+  sed 's/^/    /' "$COPY_LOG" >&2
+  summary "### ❌ Promotion failed during copy"
+  summary ""
+  summary '```'
+  summary "$(tail -30 "$COPY_LOG")"
+  summary '```'
+  die "promotion copy failed; prod unchanged"
+fi
+sed 's/^/    /' "$COPY_LOG" >&2 || true
+
+# ---------------------------------------------------------------------------
+# Digest must be identical in prod.
+# ---------------------------------------------------------------------------
+step "40c verify digest in prod"
+PROD_DIGEST="$(resolve_index_digest "$DST_TAG_REF")"
+log "quarantine digest: $INDEX_DIGEST"
+log "prod digest      : $PROD_DIGEST"
+if [[ "$PROD_DIGEST" != "$INDEX_DIGEST" ]]; then
+  bad "digest changed during promotion"
+  die "digest mismatch: prod=$PROD_DIGEST expected=$INDEX_DIGEST -- attestations orphaned"
+fi
+ok "digest preserved end to end: $PROD_DIGEST"
+
+# ---------------------------------------------------------------------------
+# Re-run the attestation presence check against PROD.
+#
+# Deliberately not assumed from the quarantine result. The point of the pipeline
+# is that attestations survive a copy, and this is the second copy -- so it gets
+# checked the same way the first one did. A promotion that quietly dropped the
+# referrers would otherwise pass unnoticed, which is the exact failure this whole
+# design exists to prevent.
+# ---------------------------------------------------------------------------
+step "40d re-verify attestations in prod"
+VERIFY_TARGET=prod SKIP_LOGIN=1 "$SCRIPTS_DIR/20-verify.sh" || {
+  summary "### ❌ Attestations did not survive promotion"
+  summary ""
+  summary "The image reached prod at \`$PROD_DIGEST\` but its attestations did not."
+  die "prod attestation check failed -- prod holds an image whose proof is missing"
+}
+ok "attestations present in prod"
+
+# ---------------------------------------------------------------------------
+# Record the promoted references.
+# ---------------------------------------------------------------------------
+PROD_PLATFORM_DIGEST="$(resolve_platform_digest "$DST_TAG_REF" "$VERIFY_PLATFORM")"
+
+# shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
+manifest_set '
+  .targets.prod.digestRef = $digestRef
+  | .targets.prod.indexDigest = $indexDigest
+  | .targets.prod.platformDigest = (if $platformDigest == "" then null else $platformDigest end)
+  | .stages.promote = { status: "pass", at: $at, forced: ($forced == "1") }
+' \
+  --arg digestRef "$(gar_digest_ref prod "$PROD_DIGEST")" \
+  --arg indexDigest "$PROD_DIGEST" \
+  --arg platformDigest "$PROD_PLATFORM_DIGEST" \
+  --arg at "$(_ts)" \
+  --arg forced "$(( GATES_OK ? 0 : 1 ))"
+
+summary "### ✅ Promoted to prod"
+summary ""
+summary "| | |"
+summary "|---|---|"
+summary "| Tag reference | \`$DST_TAG_REF\` |"
+summary "| Digest reference | \`$(gar_digest_ref prod "$PROD_DIGEST")\` |"
+summary "| Digest | \`$PROD_DIGEST\` — unchanged from Hub through quarantine to prod |"
+summary ""
+summary "Deploy by digest, not by tag:"
+summary ""
+summary '```'
+summary "$(gar_digest_ref prod "$PROD_DIGEST")"
+summary '```'
+
+step "40 promote: OK"
+log "tag reference   : $DST_TAG_REF"
+log "digest reference: $(gar_digest_ref prod "$PROD_DIGEST")  <- deploy this"
+log "next: ./scripts/50-export-evidence.sh"

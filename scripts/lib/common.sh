@@ -84,6 +84,13 @@ load_config() {
   : "${GAR_PROD_REPO:=dhi-prod}"
   : "${VERIFY_PLATFORM:=linux/amd64}"
   : "${SCAN_SEVERITY:=HIGH,CRITICAL}"
+
+  # Trivy's default DB source is mirror.gcr.io, with ghcr.io only as a fallback.
+  # Pinning ghcr.io keeps the scan gate to one registry host, which matters in any
+  # environment with an egress allowlist -- a scan that cannot fetch its database
+  # fails closed and looks like a tooling error, not a clean bill of health.
+  : "${TRIVY_DB_REPOSITORY:=ghcr.io/aquasecurity/trivy-db:2}"
+  export TRIVY_DB_REPOSITORY
   : "${REPO:=dhi-node}"
   : "${TAG:=latest}"
   : "${GITHUB_REPO:=dhi-gar-pipeline}"
