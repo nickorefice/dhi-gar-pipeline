@@ -200,7 +200,7 @@ jq -n \
    }' >"$BUNDLE/manifest.json"
 
 log "bundle contents:"
-(cd "$BUNDLE" && ls -la | tail -n +2 | awk '{printf "    %-34s %8s\n", $NF, $5}') >&2
+find "$BUNDLE" -maxdepth 1 -type f -printf '    %-34f %8s\n' 2>/dev/null | sort >&2
 
 # ---------------------------------------------------------------------------
 # 4. Upload

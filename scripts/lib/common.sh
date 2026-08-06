@@ -261,6 +261,59 @@ manifest_set() {
 }
 
 # --------------------------------------------------------------------------
+# Gate lifecycle
+# --------------------------------------------------------------------------
+# A gate must never be able to leave a STALE PASS behind.
+#
+# This is not hypothetical -- it happened. A scan stage died on a tooling error
+# before writing its result, the previous run's "pass" was still in the manifest,
+# and 40-promote.sh read that pass and promoted an image carrying a CRITICAL CVE.
+# Exit code 0. A crashing gate was indistinguishable from a passing one, which is
+# the single worst failure mode a promotion gate can have.
+#
+# So: gate_begin overwrites the gate with status "running" the moment the stage
+# starts, and an EXIT trap converts a still-"running" gate into "error". Any
+# abnormal termination -- die, an unhandled error under set -e, SIGTERM in CI --
+# therefore lands on a non-passing status. Promotion additionally requires the
+# recorded digest to match the digest being promoted.
+gate_begin() {
+  GATE_NAME="$1"
+  export GATE_NAME
+  # shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
+  manifest_set '
+    .gates[$g]  = { status: "running", digest: $d, startedAt: $at }
+    | .stages[$g] = { status: "running", at: $at }
+  ' --arg g "$GATE_NAME" --arg d "$INDEX_DIGEST" --arg at "$(_ts)"
+  trap '_gate_trap' EXIT
+}
+
+_gate_trap() {
+  local rc=$?
+  local current
+  current="$(jq -r --arg g "${GATE_NAME:-}" '.gates[$g].status // "missing"' "$RUN_MANIFEST" 2>/dev/null || echo missing)"
+  if [[ "$current" == "running" ]]; then
+    err "gate '$GATE_NAME' terminated without recording a result (exit $rc) -- recording as ERROR"
+    err "this is deliberately NOT left as a pass: a gate that crashed has not approved anything"
+    # shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
+    manifest_set '
+      .gates[$g]  = { status: "error", digest: $d, at: $at, exitCode: ($rc | tonumber) }
+      | .stages[$g] = { status: "error", at: $at }
+    ' --arg g "$GATE_NAME" --arg d "$INDEX_DIGEST" --arg at "$(_ts)" --arg rc "$rc" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+
+# Terminal gate result. Records the digest the verdict applies to so a later stage
+# cannot apply it to different content.
+gate_end() { # gate_end <gate> <pass|fail> <json-detail>
+  # shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
+  manifest_set '
+    .gates[$g]  = ($v + { status: $st, digest: $d, at: $at })
+    | .stages[$g] = { status: $st, at: $at }
+  ' --arg g "$1" --arg st "$2" --argjson v "$3" --arg d "$INDEX_DIGEST" --arg at "$(_ts)"
+}
+
+# --------------------------------------------------------------------------
 # Digest resolution
 # --------------------------------------------------------------------------
 # `manifest head` is a HEAD request: it returns the digest without transferring

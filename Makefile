@@ -68,6 +68,8 @@ test: ## Run offline tests (classifier + referrers copy via ocidir; no credentia
 	@./tests/test-classify.sh
 	@echo
 	@./tests/test-referrers-copy.sh
+	@echo
+	@./tests/test-gate-safety.sh
 
 .PHONY: lint
 lint: ## shellcheck every script

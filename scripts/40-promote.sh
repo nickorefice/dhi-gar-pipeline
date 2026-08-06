@@ -42,11 +42,30 @@ log "digest (pinned by stage 00): $INDEX_DIGEST"
 step "40a gate check"
 VERIFY_STATUS="$(jq -r '.gates.verify.status // "not-run"' "$RUN_MANIFEST")"
 SCAN_STATUS="$(jq -r '.gates.scan.status // "not-run"' "$RUN_MANIFEST")"
-log "verify gate: $VERIFY_STATUS"
-log "scan gate  : $SCAN_STATUS"
+VERIFY_DIGEST="$(jq -r '.gates.verify.digest // ""' "$RUN_MANIFEST")"
+SCAN_DIGEST="$(jq -r '.gates.scan.digest // ""' "$RUN_MANIFEST")"
+log "verify gate: $VERIFY_STATUS (digest ${VERIFY_DIGEST:-<none recorded>})"
+log "scan gate  : $SCAN_STATUS (digest ${SCAN_DIGEST:-<none recorded>})"
 
+# A "pass" is only usable if it was recorded FOR THIS DIGEST.
+#
+# Status alone is not sufficient. A gate verdict is a statement about specific
+# content, and a manifest can outlive the content it described -- a re-sync that
+# picked up a moved upstream tag, or a hand-edited manifest, would otherwise let a
+# stale approval authorise different bytes. Both conditions are required, and an
+# absent digest is treated as unusable rather than assumed to match.
 GATES_OK=0
-[[ "$VERIFY_STATUS" == "pass" && "$SCAN_STATUS" == "pass" ]] && GATES_OK=1
+if [[ "$VERIFY_STATUS" == "pass" && "$SCAN_STATUS" == "pass" ]]; then
+  if [[ "$VERIFY_DIGEST" == "$INDEX_DIGEST" && "$SCAN_DIGEST" == "$INDEX_DIGEST" ]]; then
+    GATES_OK=1
+  else
+    bad "gate verdicts do not belong to the digest being promoted"
+    err "  promoting     : $INDEX_DIGEST"
+    err "  verify applied: ${VERIFY_DIGEST:-<none>}"
+    err "  scan applied  : ${SCAN_DIGEST:-<none>}"
+    err "re-run the gates against this digest"
+  fi
+fi
 
 if (( ! GATES_OK )); then
   if [[ "${FORCE_PROMOTE:-0}" == "1" && "${ALLOW_UNSAFE:-0}" == "1" ]]; then

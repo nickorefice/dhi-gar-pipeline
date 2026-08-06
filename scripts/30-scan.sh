@@ -49,6 +49,9 @@ log "digest (pinned by stage 00): $INDEX_DIGEST"
 log "platform: $VERIFY_PLATFORM"
 (( SKIP_VEX )) && warn "--skip-vex: VEX will NOT be applied (negative test)"
 
+# Invalidate any previous verdict before doing anything that can fail.
+gate_begin scan
+
 if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
   login_gar
 else
@@ -115,42 +118,120 @@ fi
 step "30b trivy (gate)"
 
 TRIVY_JSON="$RUN_DIR/trivy-report.json"
+TRIVY_BASELINE_JSON="$RUN_DIR/trivy-report-baseline.json"
 TRIVY_TXT="$RUN_DIR/trivy-report.txt"
 
-TRIVY_ARGS=(image "$SCAN_REF" --platform "$VERIFY_PLATFORM" --severity "$SCAN_SEVERITY" --scanners vuln)
-if (( ! SKIP_VEX )); then
-  for f in "${VEX_FILES[@]:-}"; do [[ -n "$f" ]] && TRIVY_ARGS+=(--vex "$f"); done
-fi
+# --image-src remote is REQUIRED, not a preference.
+#
+# Trivy otherwise tries the local Docker daemon first. That produced a hard failure
+# here against a stale daemon cache entry -- but the quiet case is worse: if the
+# daemon happens to hold something for that reference, Trivy scans LOCAL content
+# while the report names a registry digest. In a digest-pinned pipeline whose whole
+# claim is "the thing we scanned is the thing we promoted", scanning a local cache
+# breaks that claim silently.
+TRIVY_BASE_ARGS=(image "$SCAN_REF" --image-src remote --platform "$VERIFY_PLATFORM" \
+                 --severity "$SCAN_SEVERITY" --scanners vuln)
 
-# JSON pass: --exit-code 0 so we always get a parseable report; the gate decision
-# is made from the report contents, not from trivy's exit status. Trivy exiting
-# non-zero and trivy failing to run are different things and must not be conflated.
-log "trivy ${TRIVY_ARGS[*]} --format json"
-if ! trivy "${TRIVY_ARGS[@]}" --format json --output "$TRIVY_JSON" --exit-code 0 2>"$TRIVY_TXT.err"; then
+run_trivy() { # run_trivy <output-file> [extra args...]
+  local out="$1"; shift
+  # --exit-code 0 always: the gate decision is made from the report contents, not
+  # from trivy's exit status. "trivy found issues" and "trivy failed to run" are
+  # different outcomes and must never be conflated -- the second one is a tooling
+  # failure, not a clean bill of health.
+  trivy "${TRIVY_BASE_ARGS[@]}" "$@" --format json --output "$out" --exit-code 0 2>"$out.err"
+}
+
+# Pass 1 -- BASELINE, no VEX. This is what an ordinary scanner reports about a
+# hardened image, and it is the number a customer is used to seeing.
+log "trivy pass 1/2: baseline (no VEX)"
+if ! run_trivy "$TRIVY_BASELINE_JSON"; then
   err "trivy failed to run:"
-  sed 's/^/    /' "$TRIVY_TXT.err" >&2
+  sed 's/^/    /' "$TRIVY_BASELINE_JSON.err" >&2
   summary "### ❌ Scan gate error"
   summary ""
   summary '```'
-  summary "$(tail -20 "$TRIVY_TXT.err")"
+  summary "$(tail -20 "$TRIVY_BASELINE_JSON.err")"
   summary '```'
-  die "trivy could not scan $SCAN_REF (this is a tooling failure, not a clean bill of health)"
+  die "trivy could not scan $SCAN_REF (tooling failure, NOT a clean bill of health)"
+fi
+
+# Pass 2 -- the GATE, with the vendor's VEX applied (unless --skip-vex).
+TRIVY_VEX_ARGS=()
+if (( ! SKIP_VEX )); then
+  for f in "${VEX_FILES[@]:-}"; do [[ -n "$f" ]] && TRIVY_VEX_ARGS+=(--vex "$f"); done
+fi
+log "trivy pass 2/2: gate ($( (( SKIP_VEX )) && echo 'VEX SUPPRESSED by --skip-vex' || echo "${#TRIVY_VEX_ARGS[@]} VEX arg(s)"))"
+
+# Expanded via an explicit length test, NOT "${ARR[@]:-}". On an empty array that
+# form yields a single empty-string argument, which Trivy rejects as bad usage --
+# so --skip-vex died as a tooling error instead of failing the gate, which is the
+# opposite of what a negative test is for.
+if (( ${#TRIVY_VEX_ARGS[@]} )); then
+  run_trivy_gate() { run_trivy "$1" "${TRIVY_VEX_ARGS[@]}"; }
+  trivy_table() { trivy "${TRIVY_BASE_ARGS[@]}" "${TRIVY_VEX_ARGS[@]}" --format table --exit-code 0; }
+else
+  run_trivy_gate() { run_trivy "$1"; }
+  trivy_table() { trivy "${TRIVY_BASE_ARGS[@]}" --format table --exit-code 0; }
+fi
+
+if ! run_trivy_gate "$TRIVY_JSON"; then
+  err "trivy failed to run (VEX pass):"
+  sed 's/^/    /' "$TRIVY_JSON.err" >&2
+  die "trivy could not scan $SCAN_REF with VEX applied"
 fi
 
 # Human-readable pass for the demo.
-trivy "${TRIVY_ARGS[@]}" --format table --exit-code 0 >"$TRIVY_TXT" 2>/dev/null || true
+trivy_table >"$TRIVY_TXT" 2>/dev/null || true
 sed 's/^/    /' "$TRIVY_TXT" >&2 || true
 
-# Findings that survived VEX. Trivy moves VEX-suppressed findings out of
-# .Vulnerabilities into .ModifiedFindings, so counting .Vulnerabilities gives
-# exactly "what VEX did not explain away".
-GATING="$(jq '[ (.Results // [])[] | (.Vulnerabilities // [])[]
-                | select(.Severity == "HIGH" or .Severity == "CRITICAL") ]' "$TRIVY_JSON")"
-GATING_COUNT="$(jq 'length' <<<"$GATING")"
-SUPPRESSED_COUNT="$(jq '[ (.Results // [])[] | (.ModifiedFindings // [])[] ] | length' "$TRIVY_JSON")"
+extract_findings() {
+  jq '[ (.Results // [])[] | (.Vulnerabilities // [])[]
+        | select(.Severity == "HIGH" or .Severity == "CRITICAL") ]' "$1"
+}
 
-log "HIGH/CRITICAL after VEX : $GATING_COUNT"
-log "suppressed by VEX       : $SUPPRESSED_COUNT"
+BASELINE="$(extract_findings "$TRIVY_BASELINE_JSON")"
+GATING="$(extract_findings "$TRIVY_JSON")"
+BASELINE_COUNT="$(jq '[ .[] | .VulnerabilityID ] | unique | length' <<<"$BASELINE")"
+GATING_COUNT="$(jq 'length' <<<"$GATING")"
+
+# Suppressed = baseline minus gating, computed by set difference.
+#
+# Deliberately NOT read from Trivy's .ModifiedFindings: with --vex from a file,
+# Trivy 0.73 drops matched findings without populating that field (verified, even
+# with --show-suppressed). Trusting it would silently report "0 suppressed" and
+# throw away the most informative number this gate produces -- the count of CVEs
+# the vendor has already assessed as not affecting this image.
+#
+# Each suppression is annotated with the justification from the VEX document, so
+# the report says WHY a CVE was set aside rather than just that it was.
+VEX_INDEX='{}'
+for f in "${VEX_FILES[@]:-}"; do
+  [[ -n "$f" && -f "$f" ]] || continue
+  VEX_INDEX="$(jq -c --slurpfile v "$f" '
+    . + ( ($v[0].statements // [])
+          | map({ key: (.vulnerability.name // .vulnerability // "?" | tostring),
+                  value: { status, justification, impact_statement } })
+          | from_entries )' <<<"$VEX_INDEX")"
+done
+
+SUPPRESSED="$(jq -c --argjson gating "$GATING" --argjson vex "$VEX_INDEX" '
+  ([ $gating[] | .VulnerabilityID ] | unique) as $survived
+  | [ .[] | select([.VulnerabilityID] | inside($survived) | not) ]
+  | group_by(.VulnerabilityID) | map(.[0])
+  | map({ id: .VulnerabilityID, severity: .Severity, pkg: .PkgName,
+          installed: .InstalledVersion,
+          vex: ($vex[.VulnerabilityID] // null) })' <<<"$BASELINE")"
+SUPPRESSED_COUNT="$(jq 'length' <<<"$SUPPRESSED")"
+
+log "HIGH/CRITICAL without VEX (baseline): $BASELINE_COUNT"
+log "suppressed by vendor VEX            : $SUPPRESSED_COUNT"
+log "HIGH/CRITICAL gating the promotion  : $GATING_COUNT"
+
+if (( SUPPRESSED_COUNT > 0 )); then
+  jq -r '.[] | "    SUPPRESSED  " + .severity + "  " + .id + "  " + (.pkg // "?")
+         + (if .vex then "\n                justification: " + (.vex.justification // "none given") else "" end)' \
+    <<<"$SUPPRESSED" >&2
+fi
 
 if (( GATING_COUNT > 0 )); then
   jq -r 'group_by(.VulnerabilityID)[] | .[0]
@@ -241,7 +322,9 @@ jq -n \
   --argjson vexApplied "$(( SKIP_VEX ? 0 : 1 ))" \
   --argjson vexDocuments "$VEX_COUNT" \
   --argjson gatingCount "$GATING_COUNT" \
+  --argjson baselineCount "$BASELINE_COUNT" \
   --argjson suppressedByVex "$SUPPRESSED_COUNT" \
+  --argjson suppressedDetail "$SUPPRESSED" \
   --argjson grypeCount "${GRYPE_COUNT:-null}" \
   --arg compareStatus "$COMPARE_STATUS" \
   --argjson findings "$(jq '[ group_by(.VulnerabilityID)[] | .[0]
@@ -253,18 +336,22 @@ jq -n \
      target: { ref: $ref, digest: $digest, platform: $platform },
      policy: { severity: $severity, vexApplied: ($vexApplied == 1),
                gateFailsOn: "un-VEXed HIGH/CRITICAL from Trivy" },
-     vex: { documents: $vexDocuments, suppressedFindings: $suppressedByVex },
-     trivy: { gatingFindings: $gatingCount, findings: $findings },
+     vex: { documents: $vexDocuments,
+            suppressedCount: $suppressedByVex,
+            suppressed: $suppressedDetail,
+            note: "suppressedCount is computed as (baseline findings - findings surviving VEX), not read from Trivy .ModifiedFindings, which is not populated for file-based VEX" },
+     trivy: { baselineFindings: $baselineCount,
+              gatingFindings: $gatingCount,
+              findings: $findings,
+              note: "baselineFindings is what a scanner reports with no VEX applied; gatingFindings is what remains after vendor VEX and is what blocks promotion" },
      grype: { gatingFindings: $grypeCount, note: "second opinion; never gates" },
      scoutCompare: { status: $compareStatus }
    }' >"$REPORT"
 
 log "wrote ${REPORT#"$REPO_ROOT"/}"
 
-# shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
-manifest_set '.gates.scan = $v | .stages.scan = {status: $st, at: $at}' \
-  --argjson v "$(jq -c '{status, vex, trivy: {gatingFindings: .trivy.gatingFindings}, policy}' "$REPORT")" \
-  --arg st "$GATE_STATUS" --arg at "$(_ts)"
+gate_end scan "$GATE_STATUS" \
+  "$(jq -c '{vex, trivy: {baselineFindings: .trivy.baselineFindings, gatingFindings: .trivy.gatingFindings}, policy}' "$REPORT")"
 
 if [[ "$GATE_STATUS" == "pass" ]]; then
   summary "### ✅ Scan gate passed"
@@ -278,10 +365,23 @@ summary "| Image | \`$SCAN_REF\` |"
 summary "| Threshold | $SCAN_SEVERITY |"
 if (( SKIP_VEX )); then VEX_CELL="**no** (--skip-vex)"; else VEX_CELL="yes ($VEX_COUNT document(s))"; fi
 summary "| VEX applied | $VEX_CELL |"
-summary "| Suppressed by VEX | $SUPPRESSED_COUNT |"
+summary "| Findings without VEX (baseline) | $BASELINE_COUNT |"
+summary "| Suppressed by vendor VEX | $SUPPRESSED_COUNT |"
 summary "| **Gating findings** | **$GATING_COUNT** |"
 summary "| Grype (report-only) | ${GRYPE_COUNT:-n/a} |"
 summary "| Scout compare | $COMPARE_STATUS |"
+
+if (( SUPPRESSED_COUNT > 0 )); then
+  summary ""
+  summary "**Suppressed by the vendor's signed VEX** — assessed as not affecting this image:"
+  summary ""
+  summary "| Severity | CVE | Package | Justification |"
+  summary "|---|---|---|---|"
+  while read -r line; do summary "$line"; done < <(
+    jq -r '.vex.suppressed[] | "| " + .severity + " | " + .id + " | " + (.pkg // "?")
+           + " | " + (.vex.justification // "_not stated_") + " |"' "$REPORT"
+  )
+fi
 
 if (( GATING_COUNT > 0 )); then
   summary ""

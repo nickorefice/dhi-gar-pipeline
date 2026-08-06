@@ -37,6 +37,11 @@ REPORT="$RUN_DIR/verify-report${TARGET:+-$TARGET}.json"
 step "20 verify: $QTAG_REF"
 log "expected digest (from stage 00): $INDEX_DIGEST"
 
+# Invalidate any previous verdict before doing anything that can fail. Only the
+# quarantine pass owns the "verify" gate -- the prod re-check (VERIFY_TARGET=prod,
+# invoked by 40-promote.sh) must not clobber it.
+[[ "$TARGET" == "quarantine" ]] && gate_begin verify
+
 if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
   login_gar
 else
@@ -200,10 +205,10 @@ jq -n \
 
 log "wrote ${REPORT#"$REPO_ROOT"/}"
 
-# shellcheck disable=SC2016  # jq program: $vars are jq bindings from --arg
-manifest_set '.gates.verify = $v | .stages.verify = {status: $st, at: $at}' \
-  --argjson v "$(jq -c '{status, summary, groupsPresent: .attestations.groupsPresent, groupsMissing: .attestations.groupsMissing}' "$REPORT")" \
-  --arg st "$GATE_STATUS" --arg at "$(_ts)"
+if [[ "$TARGET" == "quarantine" ]]; then
+  gate_end verify "$GATE_STATUS" \
+    "$(jq -c '{summary, groupsPresent: .attestations.groupsPresent, groupsMissing: .attestations.groupsMissing}' "$REPORT")"
+fi
 
 # GitHub step summary -- a failed gate must say which check failed and why,
 # without anyone opening the raw logs.
