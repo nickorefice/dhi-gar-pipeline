@@ -141,11 +141,20 @@ fi
 # debian-based DHI tags and not on alpine ones -- a property of the upstream
 # image, not of this copy, so failing here would block an image for something the
 # pipeline neither caused nor can fix. REQUIRE_VEX=1 makes it a hard requirement.
+# Which groups are advisory *after* policy is applied: an expected group that
+# REQUIRE_VEX promoted to required is no longer advisory.
+EXPECTED_CONFIGURED="$(jq -c --argjson req "$REQUIRED" '(.expectedGroups // []) - $req' "$ATTESTATION_TYPES")"
+
 if [[ "$EXPECTED_MISSING" != "[]" ]]; then
   add_check expected-attestations warn "expected but absent: $EXPECTED_MISSING" \
     "not present on this tag. If policy requires it, re-run with REQUIRE_VEX=1 to fail instead of warn. Note the scan gate will run unsuppressed without VEX."
+elif [[ "$EXPECTED_CONFIGURED" == "[]" ]]; then
+  # Everything that would merely be "expected" has been promoted to required by
+  # policy, so there is nothing left for this check to soften. Saying "all present"
+  # here would read as a contradiction next to a required-group failure.
+  add_check expected-attestations pass "no advisory groups apply (all are required by policy)" ""
 else
-  add_check expected-attestations pass "all expected attestation groups present" ""
+  add_check expected-attestations pass "all expected attestation groups present: $EXPECTED_CONFIGURED" ""
 fi
 
 # Unclassified referrers do not fail the gate -- an unrecognised extra attestation
