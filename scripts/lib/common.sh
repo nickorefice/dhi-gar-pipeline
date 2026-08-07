@@ -92,7 +92,7 @@ load_config() {
   : "${TRIVY_DB_REPOSITORY:=ghcr.io/aquasecurity/trivy-db:2}"
   export TRIVY_DB_REPOSITORY
   : "${REPO:=dhi-node}"
-  : "${TAG:=latest}"
+  : "${TAG:=24-alpine}"   # DHI publishes no "latest" tag
   : "${GITHUB_REPO:=dhi-gar-pipeline}"
 
   GAR_HOST="${GAR_LOCATION}-docker.pkg.dev"
@@ -174,10 +174,36 @@ _login_both() { # _login_both <host> <user> <secret>
 }
 
 # One Docker Hub PAT authenticates both docker.io and registry.scout.docker.com.
+#
+# The PAT is optional, because some environments inject Docker Hub credentials at
+# the network layer (a sandbox proxy, a credential helper, an existing docker
+# login). Observed in exactly such an environment: docker.io was authenticated
+# without any PAT, while registry.scout.docker.com was NOT -- and since that is
+# where every DHI attestation lives, the image side worked and the attestation
+# side returned "unauthorized".
+#
+# So a missing PAT is a warning, not a fatal error: the pipeline can still resolve
+# and copy the image, and the verify gate will fail loudly and specifically if the
+# attestations could not be read. Dying here would hide which half is broken.
+#
+# If DOCKERHUB_PAT_FILE points at a file, it is read from there -- keeping the
+# secret out of the process environment and out of shell history.
 login_dockerhub() {
-  require_vars DOCKERHUB_USERNAME
-  [[ -n "${DOCKERHUB_PAT:-}" ]] || die "DOCKERHUB_PAT is not set (export it; never commit it)"
+  if [[ -z "${DOCKERHUB_PAT:-}" && -n "${DOCKERHUB_PAT_FILE:-}" && -r "${DOCKERHUB_PAT_FILE}" ]]; then
+    DOCKERHUB_PAT="$(tr -d '\r\n' <"$DOCKERHUB_PAT_FILE")"
+    log "auth: PAT read from $DOCKERHUB_PAT_FILE"
+  fi
 
+  if [[ -z "${DOCKERHUB_PAT:-}" ]]; then
+    warn "DOCKERHUB_PAT is not set."
+    warn "  If this environment injects Docker Hub credentials, docker.io will still work."
+    warn "  $SCOUT_REGISTRY almost certainly will NOT -- and that is where the"
+    warn "  attestations live, so expect the verify gate to report them unreadable."
+    warn "  Provide a read-only PAT via DOCKERHUB_PAT or DOCKERHUB_PAT_FILE to fix that."
+    return 0
+  fi
+
+  require_vars DOCKERHUB_USERNAME
   local host
   for host in docker.io "$SCOUT_REGISTRY"; do
     log "auth: login $host as $DOCKERHUB_USERNAME"
