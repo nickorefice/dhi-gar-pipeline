@@ -24,3 +24,13 @@ sa-key*.json
 
 # macOS
 .DS_Store
+
+# Terraform plan files are binary archives embedding resource values (project
+# IDs, provider paths). The earlier pattern terraform/*.tfplan missed a file
+# literally named "tfplan" -- match both shapes.
+terraform/tfplan
+*.tfplan
+
+# Python bytecode (the relay tests import main.py)
+__pycache__/
+*.pyc
