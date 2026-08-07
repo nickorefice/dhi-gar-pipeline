@@ -85,3 +85,49 @@ variable "labels" {
     purpose    = "poc"
   }
 }
+
+# ---------------------------------------------------------------------------
+# Webhook relay (see relay/README.md). Opt-in: needs run.googleapis.com and
+# secretmanager.googleapis.com, which the rest of this stack does not use.
+# ---------------------------------------------------------------------------
+variable "deploy_relay" {
+  description = "Deploy the Cloud Run webhook relay. Requires run + secretmanager APIs and a pre-built image."
+  type        = bool
+  default     = false
+}
+
+variable "relay_image" {
+  description = "Container image for the relay. Build it once with `gcloud run deploy --source relay/`, or push relay/Dockerfile to GAR."
+  type        = string
+  default     = "us-central1-docker.pkg.dev/PROJECT/dhi-prod/dhi-webhook-relay:latest"
+}
+
+variable "dockerhub_org" {
+  description = "Docker Hub organization holding the mirrored DHI repositories."
+  type        = string
+  default     = "nicksdemoorg"
+}
+
+variable "relay_allowed_repo" {
+  description = "Repository name (without org) the relay will accept webhooks for. A leaked relay URL cannot name any other image."
+  type        = string
+  default     = "dhi-node"
+}
+
+variable "relay_tag_allow" {
+  description = <<-EOT
+    Comma-separated regexes a tag must match before the relay dispatches.
+
+    FAIL-CLOSED: empty means nothing is dispatched. DHI mirrors all tags by default
+    and dhi-node carries ~450, so an unfiltered relay turns one upstream rebuild
+    into hundreds of concurrent pipeline runs.
+  EOT
+  type        = string
+  default     = "^2[0-9]-debian13$,^24-alpine$"
+}
+
+variable "relay_tag_deny" {
+  description = "Comma-separated regexes that reject a tag, applied after the allow list. -dev images ship a shell and package manager."
+  type        = string
+  default     = "-dev$"
+}

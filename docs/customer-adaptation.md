@@ -34,24 +34,44 @@ Identity Federation issues short-lived credentials per run, and there is no key.
 
 ---
 
-## 2. Trigger: cron → Docker Hub webhook
+## 2. Trigger: Docker Hub webhook, with cron as a backstop
 
-**POC:** `workflow_dispatch` plus a daily cron over `sync-config.json`.
+**Implemented** — see [relay/README.md](../relay/README.md). A webhook on the
+mirrored repository is relayed to `repository_dispatch`, so a new tag is gated
+within minutes instead of up to a day.
 
-**Production:** a Docker Hub webhook on the mirrored repository, relayed to
-`repository_dispatch`. DHI images are rebuilt continuously; a daily cron means a
-CVE fix can sit unmirrored for up to 24 hours.
+Three things about this are worth knowing before you build it yourself.
 
-```
-Docker Hub webhook → relay (Cloud Run / Lambda, verifies the signature)
-                   → POST /repos/{owner}/{repo}/dispatches
-                   → workflow runs for that one tag
-```
+**[observed] Docker Hub sends no HMAC, signature, or secret header.** There is
+nothing to verify, so the URL is the only credential, and Cloud Run must allow
+unauthenticated invocations because Docker Hub cannot present a GCP identity. The
+relay therefore constrains what a leaked URL can achieve: an allow-listed
+repository, an allow-listed tag, dedupe on `repo:tag:pushed_at`, and the workflow
+re-checking the request against `sync-config.json`. Worst case, someone with the URL
+re-triggers a sync of a tag you already sync, at a digest the gates still must pass.
 
-The relay exists because Docker Hub webhooks cannot authenticate to the GitHub API
-directly. Keep the cron as a **reconciliation backstop** — webhooks get dropped,
-and a daily sweep catches what the event stream missed. `regsync check` is well
-suited to that role.
+**[observed] The tag filter is load-bearing, not a nicety.** DHI mirrors **all**
+tags by default and `dhi-node` carries ~450. One upstream rebuild can deliver a
+burst of webhooks; unfiltered that is hundreds of concurrent pipeline runs, each
+pulling an image and running two scanners. `TAG_ALLOW` is fail-closed — empty
+dispatches nothing, because a relay that syncs nothing is a visible and harmless
+misconfiguration while one that syncs everything is a self-inflicted CI outage.
+
+**[observed] An Organization Access Token cannot create the webhook.** The Hub API
+rejects it with `{"detail":"Cannot log into an organization account"}`, so webhook
+creation is a UI step (or needs a personal token with admin on the repo). Plan for
+it as a manual step in the runbook.
+
+**Keep the cron.** Docker Hub does not guarantee delivery, relays get redeployed,
+and deliveries get dropped. A daily sweep over `sync-config.json` catches what the
+event stream missed. `regsync check` suits the same role declaratively.
+
+One thing to verify in your own org before retiring the cron: that a **mirror sync**
+actually fires a webhook. The docs state mirrored DHI repos are ordinary Hub
+repositories supporting webhooks and that mirrors continuously receive new tags,
+which implies one webhook per mirrored tag — but that is read from documentation,
+not observed, because the mirror had no new tag during this build. Watch the
+webhook delivery history after the next upstream DHI release.
 
 ---
 

@@ -58,6 +58,11 @@ Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemo
                                      ← SBOMs, provenance, VEX, gate reports
 ```
 
+**Triggering:** a Docker Hub webhook on the mirrored repo fires the pipeline within
+minutes of a new tag, via a relay that translates the webhook into a
+`repository_dispatch`. The daily cron remains as a reconciliation backstop. See
+[relay/README.md](relay/README.md).
+
 | Stage | Script | Does |
 |---|---|---|
 | 00 | `00-resolve.sh` | Resolve tag → digest **once**; write the run manifest |
@@ -245,7 +250,15 @@ gh workflow run sync-dhi.yaml -f repo=dhi-node -f tag=26-debian13 -f require_vex
 gh run watch
 ```
 
-Or locally: `make all REPO=dhi-node TAG=26-debian13`.
+Or locally: `make all REPO=dhi-node TAG=26-debian13`. In production this is triggered
+by a Docker Hub webhook rather than by hand — to show that path, post a real Hub
+payload at the relay:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+  --data @tests/fixtures/dockerhub-webhook.json "https://<relay>/hook/<SECRET>"
+# {"status": "dispatched", "repo": "nicksdemoorg/dhi-node", "tag": "26-debian13"}
+```
 
 Watch the Actions UI: resolve → sync → **verify** → **scan** → promote → evidence.
 No GCP key anywhere — the `Authenticate to GCP (WIF)` step exchanges a GitHub OIDC
@@ -322,7 +335,7 @@ un-VEXed HIGH/CRITICAL findings block promotion.
 ## Offline tests
 
 ```bash
-make test    # 65 assertions, no network / registry / cloud credentials
+make test    # 85 assertions, no network / registry / cloud credentials
 make lint    # shellcheck -x
 ```
 
@@ -332,6 +345,7 @@ make lint    # shellcheck -x
 | `test-referrers-copy.sh` (13) | Real `regctl` copies between `ocidir://` layouts: the silent `--external` failure, naive-copy attestation loss, native referrers at the target, payload-level type resolution |
 | `test-gate-safety.sh` (10) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest |
 | `test-vex-normalize.sh` (16) | Source→binary PURL remapping, one-to-many, epoch handling, version-mismatch refusal, and that no status/justification/CVE is ever altered |
+| `test-relay.sh` (20) | Runs the real webhook relay on loopback: secret-path auth, payload validation, repo allow-list, tag filtering, dedupe, and fail-closed misconfiguration |
 
 `test-gate-safety.sh` exists because of a real bug: a scan stage died before
 writing its result, the previous run's `pass` was still in the manifest, and the

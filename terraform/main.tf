@@ -19,13 +19,16 @@ resource "google_artifact_registry_repository" "quarantine" {
   description   = "DHI images freshly synced from Docker Hub, pending attestation + scan gates. Not for deployment."
   labels        = var.labels
 
-  docker_config {
-    # Tags must stay mutable: the pipeline writes the human-readable tag
-    # alongside the digest, and re-running a sync for a moved upstream tag has to
-    # be able to update it. Immutability here would break re-runs without adding
-    # safety, because every operation that matters is already digest-pinned.
-    immutable_tags = false
-  }
+  # Tags are intentionally MUTABLE (the GAR default, so no docker_config block).
+  #
+  # The pipeline writes a human-readable tag alongside the digest, and re-running a
+  # sync after an upstream tag moves has to be able to update it. Immutability would
+  # break re-runs without adding safety, since every operation that matters is
+  # already digest-pinned.
+  #
+  # Declaring `docker_config { immutable_tags = false }` explicitly looks clearer but
+  # produces a permanent phantom diff: GAR omits the block when it holds the default,
+  # so Terraform proposes adding it on every single plan and `apply` is never clean.
 }
 
 resource "google_artifact_registry_repository" "prod" {
@@ -35,9 +38,7 @@ resource "google_artifact_registry_repository" "prod" {
   description   = "DHI images that passed attestation verification and VEX-aware scanning. Deployable."
   labels        = var.labels
 
-  docker_config {
-    immutable_tags = false
-  }
+  # Mutable tags, as above -- see the note on the quarantine repository.
 }
 
 # ---------------------------------------------------------------------------

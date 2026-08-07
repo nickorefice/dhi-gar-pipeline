@@ -72,11 +72,13 @@ test: ## Run offline tests (classifier + referrers copy via ocidir; no credentia
 	@./tests/test-gate-safety.sh
 	@echo
 	@./tests/test-vex-normalize.sh
+	@echo
+	@./tests/test-relay.sh
 
 .PHONY: lint
 lint: ## shellcheck every script
 	@command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not installed -- skipping"; exit 0; }
-	@shellcheck -x scripts/*.sh scripts/lib/common.sh tests/*.sh && echo "shellcheck clean"
+	@shellcheck -x scripts/*.sh scripts/lib/common.sh tests/*.sh && python3 -m py_compile relay/main.py && echo "shellcheck + python clean"
 
 # ---------------------------------------------------------------------------
 # Pipeline stages

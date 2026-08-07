@@ -1,0 +1,4 @@
+# For `gcloud run deploy --source .`, which uses buildpacks instead of the
+# Dockerfile. Either path works; the Dockerfile gives you control over the base
+# image, which is what you want if the relay runs on a DHI python base.
+web: python3 main.py
