@@ -39,6 +39,10 @@ on:
         description: "NEGATIVE TEST: scan without VEX so the gate blocks promotion"
         type: boolean
         default: false
+      poll:
+        description: "Run the SCHEDULED POLL path instead: check every sync-config tag against prod, sync only what changed. Ignores repo/tag/require_vex/skip_vex. Exists because schedule events cannot be fired by hand, and an untestable branch is an unverified one."
+        type: boolean
+        default: false
   schedule:
     # Daily, 07:15 UTC. Off the hour on purpose: hourly boundaries are when every
     # other scheduled job in the world contends for runners.
@@ -76,8 +80,8 @@ jobs:
       # Scheduled ticks compare digests before deciding anything, which needs
       # regctl and a GAR token. Dispatch-driven runs skip all three steps -- they
       # were asked for explicitly and always run.
-      - name: Install regctl (schedule only)
-        if: github.event_name == 'schedule'
+      - name: Install regctl (poll path only)
+        if: github.event_name == 'schedule' || inputs.poll == true
         run: |
           set -euo pipefail
           curl -fsSL -o /usr/local/bin/regctl \
@@ -85,8 +89,8 @@ jobs:
           chmod +x /usr/local/bin/regctl
 
       - id: auth-plan
-        name: Authenticate to GCP (WIF, schedule only)
-        if: github.event_name == 'schedule'
+        name: Authenticate to GCP (WIF, poll path only)
+        if: github.event_name == 'schedule' || inputs.poll == true
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
@@ -105,6 +109,7 @@ jobs:
           IN_TAG: ${{ github.event.inputs.tag }}
           IN_REQUIRE_VEX: ${{ github.event.inputs.require_vex || 'false' }}
           IN_SKIP_VEX: ${{ github.event.inputs.skip_vex || 'false' }}
+          IN_POLL: ${{ github.event.inputs.poll || 'false' }}
           DISPATCH_REPO: ${{ github.event.client_payload.repo }}
           DISPATCH_TAG: ${{ github.event.client_payload.tag }}
           # For check-current.sh on scheduled ticks.
@@ -117,11 +122,49 @@ jobs:
           GAR_ACCESS_TOKEN: ${{ steps.auth-plan.outputs.access_token }}
         run: |
           set -euo pipefail
+
+          # The poll: only tags whose upstream digest differs from prod make it
+          # into the matrix. An all-current tick produces an empty matrix and the
+          # sync job skips entirely. Shared by the schedule trigger and the
+          # manual poll=true dispatch, so what the cron runs is exactly what can
+          # be tested by hand.
+          #
+          # check-current exits 3 when an upstream digest could not be resolved
+          # (dead credential, removed tag). Its stdout is still authoritative for
+          # what it DID determine, so the run continues with that -- but
+          # annotated, because a poll that silently rots is indistinguishable
+          # from "no new tags, ever".
+          run_poll() {
+            if stale="$(./scripts/check-current.sh)"; then
+              :
+            else
+              echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
+            fi
+            matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
+            {
+              if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
+                echo "### Poll: everything current"
+                echo ""
+                echo "No configured tag differs from prod. Nothing to do."
+              else
+                echo "### Poll: sync needed"
+                echo ""
+                echo "| Tag | Reason | Upstream digest |"
+                echo "|---|---|---|"
+                jq -r '.[] | "| \(.repo):\(.tag) | \(.reason) | `\(.srcDigest[0:29])...` |"' <<<"$stale"
+              fi
+            } >>"$GITHUB_STEP_SUMMARY"
+          }
+
           case "$EVENT_NAME" in
             workflow_dispatch)
-              matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
-                --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
-                '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+              if [[ "$IN_POLL" == "true" ]]; then
+                run_poll
+              else
+                matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
+                  --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
+                  '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+              fi
               ;;
             repository_dispatch)
               # The relay already allow-listed repo and tag, but this job re-checks
@@ -139,34 +182,7 @@ jobs:
               fi
               ;;
             schedule)
-              # The fast poll: only tags whose upstream digest differs from prod
-              # make it into the matrix. An all-current tick produces an empty
-              # matrix and the sync job skips entirely.
-              #
-              # check-current exits 3 when an upstream digest could not be
-              # resolved (dead credential, removed tag). Its stdout is still
-              # authoritative for what it DID determine, so the run continues
-              # with that -- but annotated, because a poll that silently rots is
-              # indistinguishable from "no new tags, ever".
-              if stale="$(./scripts/check-current.sh)"; then
-                :
-              else
-                echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
-              fi
-              matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
-              {
-                if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
-                  echo "### Poll: everything current"
-                  echo ""
-                  echo "No configured tag differs from prod. Nothing to do."
-                else
-                  echo "### Poll: sync needed"
-                  echo ""
-                  echo "| Tag | Reason | Upstream digest |"
-                  echo "|---|---|---|"
-                  jq -r '.[] | "| \(.repo):\(.tag) | \(.reason) | `\(.srcDigest[0:29])...` |"' <<<"$stale"
-                fi
-              } >>"$GITHUB_STEP_SUMMARY"
+              run_poll
               ;;
             *)
               matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
