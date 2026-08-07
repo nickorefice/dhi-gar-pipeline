@@ -1,0 +1,234 @@
+name: Sync DHI to GAR
+
+# Triggers:
+#   workflow_dispatch  -- on demand, for the demo and for one-off syncs
+#   schedule           -- daily, over the tag list in sync-config.json
+#
+# A daily cron is the POC's stand-in for event-driven sync. In production a
+# customer would replace it with a Docker Hub webhook on the mirrored repository
+# relayed to repository_dispatch, so a new DHI build is gated within minutes
+# instead of up to a day later. Cron is used here because it needs no public
+# endpoint and makes the demo reproducible. See docs/customer-adaptation.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository under the Hub org (e.g. dhi-node)"
+        required: true
+        default: dhi-node
+      tag:
+        description: "Tag to sync. DHI publishes no 'latest' (e.g. 26-debian13)"
+        required: true
+        default: 26-debian13
+      require_vex:
+        description: "Fail verification if OpenVEX is absent (Alpine DHI has none)"
+        type: boolean
+        default: false
+      skip_vex:
+        description: "NEGATIVE TEST: scan without VEX so the gate blocks promotion"
+        type: boolean
+        default: false
+  schedule:
+    # 07:15 UTC daily. Off the hour on purpose: hourly boundaries are when every
+    # other scheduled job in the world contends for runners.
+    - cron: "15 7 * * *"
+
+concurrency:
+  # Serialise per repo+tag. Two runs promoting the same tag concurrently could
+  # interleave a verified digest with a different one being copied.
+  group: sync-dhi-${{ github.event.inputs.repo || 'scheduled' }}-${{ github.event.inputs.tag || 'all' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Required for Workload Identity Federation. This is the whole reason no GCP
+  # service-account key exists anywhere in this repo or its secrets.
+  id-token: write
+
+jobs:
+  # A scheduled run fans out over sync-config.json; a dispatch run handles one tag.
+  # Building the matrix in a separate job keeps the tag list reviewable as data.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: build
+        name: Build the tag matrix
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            matrix="$(jq -cn \
+              --arg repo '${{ github.event.inputs.repo }}' \
+              --arg tag '${{ github.event.inputs.tag }}' \
+              --argjson rv ${{ github.event.inputs.require_vex || false }} \
+              --argjson sv ${{ github.event.inputs.skip_vex || false }} \
+              '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+          else
+            matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
+          fi
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+          echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex)"' <<<"$matrix"
+
+  sync:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # one tag failing its gate must not cancel the others
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      REPO: ${{ matrix.repo }}
+      TAG: ${{ matrix.tag }}
+      REQUIRE_VEX: ${{ matrix.requireVex && '1' || '0' }}
+      # Repo variables, written by `make gh-vars` from the Terraform outputs.
+      # Non-secret identifiers: useless without an OIDC token from this repo.
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GAR_LOCATION: ${{ vars.GAR_LOCATION }}
+      GAR_QUARANTINE_REPO: ${{ vars.GAR_QUARANTINE_REPO }}
+      GAR_PROD_REPO: ${{ vars.GAR_PROD_REPO }}
+      EVIDENCE_BUCKET: ${{ vars.EVIDENCE_BUCKET }}
+      DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG }}
+      # The Docker Hub credential is the only long-lived secret in the pipeline.
+      # For an Organization Access Token the username is the ORG name, not a
+      # personal handle -- authenticating as a user fails with a bare
+      # "unauthorized" that reads like a permissions problem.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
+      TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # Toolchain. Pinned versions so a demo cannot drift under you.
+      # ---------------------------------------------------------------------
+      - name: Install regctl
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/regctl \
+            https://github.com/regclient/regclient/releases/download/v0.11.5/regctl-linux-amd64
+          chmod +x /usr/local/bin/regctl
+          regctl version --format '{{.VCSTag}}'
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/trivy.tgz \
+            https://github.com/aquasecurity/trivy/releases/download/v0.73.0/trivy_0.73.0_Linux-64bit.tar.gz
+          tar xzf /tmp/trivy.tgz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version | head -1
+
+      - name: Install Grype
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/grype.tgz \
+            https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_amd64.tar.gz
+          tar xzf /tmp/grype.tgz -C /tmp grype
+          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
+
+      - name: Install docker scout
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/scout.tgz \
+            https://github.com/docker/scout-cli/releases/download/v1.24.0/docker-scout_1.24.0_linux_amd64.tar.gz
+          tar xzf /tmp/scout.tgz -C /tmp docker-scout
+          mkdir -p "$HOME/.docker/cli-plugins"
+          install -m 0755 /tmp/docker-scout "$HOME/.docker/cli-plugins/docker-scout"
+
+      # ---------------------------------------------------------------------
+      # GCP auth via Workload Identity Federation. No service-account key.
+      # ---------------------------------------------------------------------
+      - id: auth
+        name: Authenticate to GCP (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          # An access token, so the scripts can hand it straight to regctl and
+          # never touch a key file.
+          token_format: access_token
+
+      - name: Export the GAR token
+        run: echo "GAR_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >>"$GITHUB_ENV"
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # ---------------------------------------------------------------------
+      # Pipeline. Steps map 1:1 onto the scripts, which are the same code path a
+      # developer runs locally -- only the source of GCP credentials differs.
+      # ---------------------------------------------------------------------
+      - name: 00 Resolve tag to digest
+        run: ./scripts/00-resolve.sh
+
+      - name: 10 Sync to quarantine (image + referrers)
+        run: ./scripts/10-sync.sh
+
+      - name: 20 Verify gate (attestations survived, digest unchanged)
+        run: ./scripts/20-verify.sh
+
+      - name: 30 Scan gate (Trivy with VEX; Grype report-only)
+        run: |
+          if [[ "${{ matrix.skipVex }}" == "true" ]]; then
+            echo "::warning title=Negative test::Scanning with --skip-vex; the gate is expected to fail"
+            ./scripts/30-scan.sh --skip-vex
+          else
+            ./scripts/30-scan.sh
+          fi
+
+      - name: 40 Promote to prod
+        run: ./scripts/40-promote.sh
+
+      # Evidence is exported even when a gate failed: "we caught this and stopped"
+      # is exactly what an auditor needs to see, and an empty bucket is
+      # indistinguishable from a gate that never ran.
+      - name: 50 Export evidence
+        if: always()
+        run: ./scripts/50-export-evidence.sh
+
+      - name: Upload reports as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.repo }}-${{ matrix.tag }}
+          path: |
+            out/**/run-manifest.json
+            out/**/verify-report*.json
+            out/**/scan-report.json
+            out/**/trivy-report*.json
+            out/**/grype-report.json
+            out/**/scout-compare.txt
+            out/**/inventory-*.json
+            out/**/evidence/manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # A failed gate must be legible from the run summary alone, without
+      # anyone opening logs or downloading an artifact.
+      - name: Explain a failure in the job summary
+        if: failure()
+        run: |
+          {
+            echo "### ❌ \`${REPO}:${TAG}\` did not reach prod"
+            echo
+            m="out/${REPO}/$(echo "$TAG" | tr -c 'A-Za-z0-9._-' '_')/run-manifest.json"
+            if [[ -f "$m" ]]; then
+              echo "| Stage | Status |"
+              echo "|---|---|"
+              jq -r '.stages | to_entries[] | "| \(.key) | \(.value.status // "not run") |"' "$m"
+              echo
+              echo "Digest: \`$(jq -r '.source.indexDigest' "$m")\`"
+              echo
+              missing="$(jq -r '.gates.verify.groupsMissing // [] | join(", ")' "$m")"
+              [[ -n "$missing" ]] && echo "Missing attestation groups: **$missing**"
+              gating="$(jq -r '.gates.scan.trivy.gatingFindings // "n/a"' "$m")"
+              echo "Un-VEXed HIGH/CRITICAL: **$gating**"
+            else
+              echo "No run manifest was produced -- the failure occurred during resolve."
+            fi
+            echo
+            echo "The image remains in quarantine and was **not** promoted."
+          } >>"$GITHUB_STEP_SUMMARY"

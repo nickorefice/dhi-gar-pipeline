@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Tags the scheduled run syncs. The workflow builds a matrix from this file, so",
+    "adding a tag is a one-line change reviewed like any other.",
+    "",
+    "Tag choice is not cosmetic. Observed on nicksdemoorg/dhi-node:",
+    "  - debian-based tags ship OpenVEX; alpine-based ones do not. Without VEX the",
+    "    scan gate runs unsuppressed, so a hardened image can report CVEs its vendor",
+    "    has already assessed as not affecting it.",
+    "  - -dev tags include a shell and package manager. They exist for build stages",
+    "    and are deliberately NOT synced to a registry that feeds production.",
+    "  - -fips and -sfw-ent carry extra attestations (dhi/fips, dhi/stig).",
+    "",
+    "requireVex fails the verify gate when OpenVEX is absent. Set it on tags where",
+    "policy demands VEX and the base image provides it."
+  ],
+  "tags": [
+    { "repo": "dhi-node", "tag": "26-debian13", "requireVex": true,
+      "note": "current Node 26 on Debian 13; ships OpenVEX" },
+    { "repo": "dhi-node", "tag": "24-debian13", "requireVex": true,
+      "note": "Node 24 LTS on Debian 13; ships OpenVEX" },
+    { "repo": "dhi-node", "tag": "24-alpine", "requireVex": false,
+      "note": "Alpine variant; no OpenVEX upstream, so VEX stays advisory here" }
+  ]
+}

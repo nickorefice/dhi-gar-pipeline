@@ -1,0 +1,77 @@
+# regsync.yaml -- declarative equivalent of 10-sync.sh.
+#
+# DOCUMENTED, NOT WIRED INTO CI. Two different jobs:
+#
+#   10-sync.sh   one tag, one run, verbose, with a pre-flight referrer count and a
+#                digest-equality assertion. Built for a demo and for a gate: every
+#                step announces what it checked.
+#
+#   regsync      continuous reconciliation over a tag list. Built for steady-state
+#                operation: `regsync once` for a single pass, `regsync server` to
+#                run on an interval. This is what a customer would actually run for
+#                ongoing mirroring.
+#
+# The important part is that regsync ALSO carries referrers, so the attestations
+# are preserved either way. What regsync does not do is gate: it copies whatever
+# upstream published. A customer running regsync still needs the verify and scan
+# stages between quarantine and prod -- regsync replaces stage 10, not the gates.
+#
+# Usage:
+#   regsync -c regsync.yaml check     # report what would change, exit non-zero if any
+#   regsync -c regsync.yaml once      # one reconciliation pass
+#   regsync -c regsync.yaml server    # run continuously on the schedule below
+#
+# Credentials come from the environment, never from this file:
+#   DOCKERHUB_ORG / DOCKERHUB_USERNAME / DOCKERHUB_PAT
+#   GCP_PROJECT_ID / GAR_ACCESS_TOKEN  (gcloud auth print-access-token)
+
+version: 1
+
+creds:
+  - registry: docker.io
+    user: "{{ env \"DOCKERHUB_USERNAME\" }}"
+    pass: "{{ env \"DOCKERHUB_PAT\" }}"
+
+  # The attestation registry needs its own entry. It is a DIFFERENT registry from
+  # docker.io even though one credential covers both, and omitting it is the single
+  # most likely way to end up mirroring images with no attestations attached --
+  # the referrers query fails and regsync carries on with the image alone.
+  - registry: registry.scout.docker.com
+    user: "{{ env \"DOCKERHUB_USERNAME\" }}"
+    pass: "{{ env \"DOCKERHUB_PAT\" }}"
+
+  - registry: us-central1-docker.pkg.dev
+    user: oauth2accesstoken
+    pass: "{{ env \"GAR_ACCESS_TOKEN\" }}"
+
+defaults:
+  # Sync into quarantine, never straight to prod. Promotion stays gated.
+  parallel: 2
+  interval: 6h
+  digestTags: true
+  referrers: true
+  mediaTypes:
+    - application/vnd.docker.distribution.manifest.v2+json
+    - application/vnd.docker.distribution.manifest.list.v2+json
+    - application/vnd.oci.image.manifest.v1+json
+    - application/vnd.oci.image.index.v1+json
+
+sync:
+  - source: docker.io/{{ env "DOCKERHUB_ORG" }}/dhi-node
+    target: us-central1-docker.pkg.dev/{{ env "GCP_PROJECT_ID" }}/dhi-quarantine/dhi-node
+    type: repository
+    referrers: true
+    referrerSource: registry.scout.docker.com/{{ env "DOCKERHUB_ORG" }}/dhi-node
+    referrerTarget: us-central1-docker.pkg.dev/{{ env "GCP_PROJECT_ID" }}/dhi-quarantine/dhi-node
+    tags:
+      # An explicit allow-list, not a broad pattern. dhi-node carries ~450 tags;
+      # mirroring them all would be slow, expensive, and would pull in variants
+      # nobody vetted.
+      allow:
+        - "26-debian13"
+        - "24-debian13"
+        - "24-alpine"
+      deny:
+        # -dev variants ship a shell and a package manager. They belong in build
+        # stages, not in a registry that feeds production.
+        - ".*-dev$"
