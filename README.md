@@ -5,52 +5,58 @@ Artifact Registry **with their signed attestations intact**, gates promotion on
 those attestations plus a VEX-aware vulnerability scan, and exports an evidence
 bundle for audit.
 
-> **Status:** proof of concept. See [Current status](#current-status).
+Proof of concept, but a working one: validated end to end against real DHI images
+in a real GCP project, from a laptop and from GitHub Actions.
 
 ## Why this exists
 
-DHI ships SBOM, SLSA provenance, VEX, and vulnerability-report attestations
-alongside each image. Those attestations are bound to the image **digest** and
-stored as OCI 1.1 referrers in a *separate* registry
-(`registry.scout.docker.com`) from the image itself.
+DHI ships SBOM, SLSA provenance, VEX, and vulnerability attestations alongside
+each image. They are bound to the image **digest** and stored as OCI 1.1 referrers
+in a *separate* registry (`registry.scout.docker.com`) from the image itself.
 
-A naive `docker pull` / `docker push` mirror silently drops all of it. What
-arrives in your internal registry is then just bytes — you have the image but
-none of the proof, so every downstream compliance question ("what's in it?",
-"who built it?", "is CVE-X actually exploitable here?") has to be answered by
-re-scanning instead of by reading the vendor's signed answer.
+A naive `docker pull` / `docker push` mirror silently drops all of it — measured,
+not assumed:
 
-This pipeline preserves the referrers, then treats them as the gate.
+| Copy method | Digest | Attestations surviving |
+|---|---|---|
+| `regctl image copy` (naive mirror) | preserved ✅ | **0** ❌ |
+| `regctl image copy --referrers --referrers-src` | preserved ✅ | **15** ✅ |
+
+Note that the digest survives the naive copy. "The digest matches" is *not*
+evidence the proof came with it.
+
+What arrives in your internal registry after a naive mirror is just bytes. Every
+downstream compliance question — what's in it, who built it, is CVE-X actually
+exploitable here — then has to be answered by re-scanning instead of by reading
+the vendor's signed answer.
 
 **The registry carries the proof; the evidence bucket carries the paperwork.**
-GAR referrers are the source of truth. The evidence bundle in GCS is a derived
-convenience copy for GRC consumption — verification is only meaningful against
-the registry.
+GAR referrers are the source of truth. The GCS bundle is a derived convenience
+copy for GRC consumption.
 
 ## Architecture
 
 ```
-Docker Hub  nicksdemoorg/dhi-node:TAG          registry.scout.docker.com/nicksdemoorg/dhi-node
-      │  (image: multi-platform index)               │  (attestations: OCI referrers)
-      └───────────────────┬───────────────────────────┘
-                          │  regctl image copy --referrers --referrers-src
-                          ▼
+Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemoorg/dhi-node
+      │  (image: multi-platform index)             │  (attestations: OCI referrers,
+      │                                            │   attached PER-PLATFORM)
+      └──────────────────┬──────────────────────────┘
+                         │  regctl image copy --referrers --referrers-src
+                         ▼
         GAR  dhi-quarantine/dhi-node   ← image + referrers, digest-pinned
-                          │
-                 ┌────────┴────────┐
-                 │  20 verify gate │  attestations present? digest unchanged?
-                 │  30 scan gate   │  Trivy + DHI VEX; Grype 2nd opinion; scout compare
-                 └────────┬────────┘
-                          │  both green (and only then)
-                          ▼
+                         │
+                ┌────────┴────────┐
+                │  20 verify gate │  attestations present? digest unchanged?
+                │  30 scan gate   │  Trivy + DHI VEX; Grype 2nd opinion; scout compare
+                └────────┬────────┘
+                         │  both green (and only then)
+                         ▼
         GAR  dhi-prod/dhi-node        ← image + referrers, same digest
-                          │
-                          ▼
-        gs://PROJECT_ID-dhi-evidence/dhi-node/sha256:.../
-                                      ← SBOM, provenance, VEX, gate reports
+                         │
+                         ▼
+        gs://PROJECT-dhi-evidence/dhi-node/sha256:.../
+                                     ← SBOMs, provenance, VEX, gate reports
 ```
-
-### Stages
 
 | Stage | Script | Does |
 |---|---|---|
@@ -64,149 +70,224 @@ Docker Hub  nicksdemoorg/dhi-node:TAG          registry.scout.docker.com/nicksde
 
 ## Design invariants
 
-These are load-bearing. Breaking any of them invalidates the attestations, which
-defeats the entire point of the pipeline.
+Breaking any of these invalidates the attestations, which defeats the point.
 
-1. **The image is never rebuilt, re-tagged into a new digest, or otherwise
-   mutated.** Attestations are bound to the digest; changing the digest orphans
-   them. There is no `docker build` anywhere in this repo, and no manifest
-   rewriting. The pipeline validates and promotes — it never transforms.
-2. **Every copy is digest-pinned.** `00-resolve.sh` resolves tag → digest once
-   and writes it to `out/<repo>/<tag>/run-manifest.json`. Stages 10–50 read the
-   digest from that manifest and never re-resolve the tag. A tag that moves
-   mid-run would otherwise let the pipeline verify one image and promote a
-   different one.
-3. **Attestations move as OCI referrers, never extract-and-reattach.**
-   `regctl image copy --referrers` preserves them as-is. Re-signing or
-   re-wrapping would substitute *our* attestation for the vendor's, discarding
-   the provenance chain that makes it worth having.
-4. **No long-lived GCP credentials.** CI authenticates via Workload Identity
-   Federation from GitHub Actions OIDC — no service-account key exists to leak.
-   Locally, `gcloud` user credentials (ADC).
-5. **Promotion requires both gates green.** A failed gate leaves the image in
-   quarantine and writes a failure report to the evidence bucket. Quarantine is
-   not a staging area you promote out of by hand; it is where images that failed
-   stay.
+1. **The image is never rebuilt or re-tagged into a new digest.** No `docker
+   build`, no manifest rewriting. The pipeline validates and promotes; it never
+   transforms.
+2. **Every copy is digest-pinned.** Stage 00 resolves the tag once; stages 10–50
+   read the digest from the run manifest and never re-resolve. A tag that moved
+   mid-run would otherwise let the pipeline verify one image and promote another.
+3. **Attestations move as OCI referrers**, never extract-and-reattach. Re-signing
+   would substitute *our* attestation for the vendor's.
+4. **No long-lived GCP credentials.** CI federates via GitHub OIDC; no
+   service-account key exists to leak.
+5. **Promotion requires both gates green**, verified against the digest being
+   promoted. A failed gate leaves the image in quarantine and still writes
+   evidence.
 
-### A note on the digest the gates inspect
+## What running this against real DHI taught us
 
-The *copy* always moves the full multi-platform index. The *gates* pin
-`linux/amd64` (`VERIFY_PLATFORM`), because DHI attaches attestations to
-per-platform manifests rather than to the index. Querying referrers on the index
-digest alone can return nothing even when attestations are present — a failure
-mode that looks identical to "the copy dropped them". `90-inspect-referrers.sh`
-exists to tell those two apart.
+Each of these invalidated an assumption the pipeline was originally built on.
+Reproduce them yourself with `make inspect`.
+
+**Attestations attach to per-platform manifest digests, not the index.** The index
+digest returns **0** referrers; each platform digest returns 14–17. A pipeline
+that resolves a tag to an index digest and asks for referrers there concludes the
+image has none. Stage 20 queries both subjects and merges.
+
+**Every DHI attestation has `artifactType: application/vnd.in-toto+json`.** Nothing
+is distinguishable by `artifactType`; the type lives only in the
+`in-toto.io/predicate-type` annotation, and the payload is an in-toto Statement
+wrapping the real document. A scanner handed the wrapper applies no VEX and
+reports success.
+
+**OpenVEX is not on every tag.** Present on debian-based tags, absent on the
+alpine ones sampled. Requiring it unconditionally fails every Alpine DHI image, so
+VEX is *expected* (warn) by default and promoted to required per tag.
+
+**Neither vulnerability attestation is a VEX substitute.** `in-toto/vulns/v0.2`
+holds `{scanner, metadata}`; `scout/vulnerabilities/v0.1` holds a findings list
+with no status or justification fields. Deriving VEX from them would invent
+assessments the vendor never made.
+
+**Scanners disagree, explainably.** On the same digest: Trivy 0 HIGH/CRITICAL,
+Grype 6 — three of them in `libc6 2.41-12+deb13u3+dhi1`. The `+dhi1` suffix is
+Docker's patched build; Trivy understands it, Grype matches the unpatched upstream
+version. This is why Grype is report-only here. See
+[docs/customer-adaptation.md](docs/customer-adaptation.md).
+
+**GAR supports the OCI referrers API natively** — no `sha256-<digest>` fallback
+tags were created, so referrers round-trip through the real API.
 
 ## Prerequisites
 
-| Tool | Purpose |
-|---|---|
-| `regctl`, `regsync` | registry copies incl. referrers — the core of the pipeline |
-| `trivy` | VEX-aware vulnerability scan (the gate) |
-| `grype` | second-opinion scan (report-only) |
-| `cosign` | signature inspection |
-| `docker scout` | `attest list` cross-check, `compare` for the diff view |
-| `gcloud` | GCP auth, GAR/GCS access |
-| `terraform` | provisions GAR repos, bucket, WIF |
-| `gh` | sets repo variables from Terraform outputs |
-| `jq` | report generation and referrer classification |
-
 ```bash
 make tools      # Homebrew on macOS, release binaries on Linux
-make versions   # confirm
+make versions
 ```
+
+`regctl`, `regsync`, `trivy`, `grype`, `cosign`, `docker scout`, `gcloud`,
+`terraform`, `gh`, `jq`.
 
 ## Setup
 
 ```bash
-make config     # creates config.env from the example
-$EDITOR config.env   # set GCP_PROJECT_ID, GITHUB_OWNER, DOCKERHUB_USERNAME
-export DOCKERHUB_PAT='dckr_pat_...'   # never committed, never in config.env
+make config                          # creates config.env
+$EDITOR config.env                   # GCP_PROJECT_ID, GITHUB_OWNER, DOCKERHUB_USERNAME
+printf '%s' 'dckr_oat_...' > ../.secrets/dockerhub-pat && chmod 600 ../.secrets/dockerhub-pat
 ```
 
-Manual steps that are deliberately not automated (they need your credentials or
-a browser):
+> **For an Organization Access Token the registry username is the ORG name**, not
+> a personal handle. Authenticating as the user fails with a bare `unauthorized`
+> that looks like a permissions problem.
 
-1. **GCP project + APIs** — `artifactregistry`, `iam`, `iamcredentials`, `sts`.
-2. **`gcloud auth login` and `gcloud auth application-default login`.**
-3. **Docker Hub PAT (read-only)** → GitHub Actions secrets `DOCKERHUB_USERNAME`,
-   `DOCKERHUB_PAT`. The same PAT must authenticate to both `docker.io` and
-   `registry.scout.docker.com`. An Organization Access Token is the enterprise
-   recommendation — see [docs/customer-adaptation.md](docs/customer-adaptation.md).
-4. **Confirm the DHI repo is mirrored** into your org: Hub UI → Hardened Images
-   → Manage → Mirrored Images, or `docker dhi mirror list --org <org>`.
+Manual steps (they need your credentials or a browser):
+
+1. A GCP project with `artifactregistry`, `iam`, `iamcredentials`, `sts` enabled.
+2. `gcloud auth login` and `gcloud auth application-default login`.
+3. A read-only Docker Hub OAT/PAT that can read the org's Hardened Images.
+4. Confirm the DHI repo is mirrored: Hub UI → Hardened Images → Manage → Mirrored
+   Images, or `docker dhi mirror list --org <org>`.
 
 Then:
 
 ```bash
 make tf-init tf-apply    # GAR repos, evidence bucket, WIF pool + provider, SA
-make gh-vars             # push Terraform outputs into GitHub Actions variables
+make gh-vars             # Terraform outputs → GitHub Actions repo variables
+gh secret set DOCKERHUB_USERNAME --body '<org>'
+gh secret set DOCKERHUB_PAT      # value on stdin
 ```
 
 ## Running it
 
 ```bash
-make inspect REPO=dhi-node TAG=22   # diagnostic: confirm attestations are visible
-make all     REPO=dhi-node TAG=22   # full pipeline, stops at the first failed gate
+make inspect REPO=dhi-node TAG=26-debian13   # diagnostic: are attestations visible?
+make all     REPO=dhi-node TAG=26-debian13   # full pipeline, stops at the first failed gate
 ```
 
-Or stage by stage:
+> DHI publishes **no `latest` tag**. Use a real one — `regctl tag ls
+> docker.io/<org>/dhi-node`.
+
+Reports land in `out/<repo>/<tag>/`.
+
+---
+
+## 10-minute demo
+
+Runs against real DHI. Nothing here is staged.
+
+### 1. Show what a naive mirror costs (1 min)
 
 ```bash
-make resolve REPO=dhi-node TAG=22
-make sync verify scan promote evidence REPO=dhi-node TAG=22
+make test        # 49 offline assertions, no credentials needed
 ```
 
-Reports land in `out/<repo>/<tag>/`: `run-manifest.json`, `verify-report.json`,
-`scan-report.json`, plus extracted attestations under `attestations/`.
+`tests/test-referrers-copy.sh` reproduces the DHI split-registry topology on local
+disk and proves a naive copy preserves the digest while dropping every
+attestation — and that querying referrers without `--external` returns **0 with a
+zero exit code**. Silent, not loud.
+
+### 2. Trigger the pipeline (2 min)
+
+```bash
+gh workflow run sync-dhi.yaml -f repo=dhi-node -f tag=26-debian13 -f require_vex=true
+gh run watch
+```
+
+Or locally: `make all REPO=dhi-node TAG=26-debian13`.
+
+Watch the Actions UI: resolve → sync → **verify** → **scan** → promote → evidence.
+No GCP key anywhere — the `Authenticate to GCP (WIF)` step exchanges a GitHub OIDC
+token for a short-lived credential.
+
+### 3. Attestations are present in GAR (2 min)
+
+```bash
+PD=$(regctl manifest head us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node:26-debian13 \
+       --platform linux/amd64 --require-digest)
+regctl artifact list us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node@$PD --format body \
+  | jq -r '.manifests[] | .annotations["in-toto.io/predicate-type"]' | sort
+```
+
+15 attestations: SPDX, CycloneDX, Scout SBOM, SLSA provenance v0.2 + v1, SLSA
+verification summary, Scout provenance, **OpenVEX**, in-toto vulns, Scout
+vulnerabilities / secrets / virus / tests, DHI source + changelog.
+
+Then confirm the digest never changed:
+
+```bash
+regctl manifest head docker.io/<org>/dhi-node:26-debian13 --require-digest
+regctl manifest head us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node:26-debian13 --require-digest
+```
+
+### 4. Scout reads them out of GAR (1 min)
+
+```bash
+docker scout attest list --platform linux/amd64 \
+  registry://us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node@$PD
+```
+
+Standard Docker tooling consuming the attestations from *your* registry — not
+Docker Hub.
+
+### 5. The evidence bucket — the "SharePoint" story (1 min)
+
+```bash
+gcloud storage ls gs://$PROJECT-dhi-evidence/dhi-node/$DIGEST/
+```
+
+19 objects: every attestation as a file, plus `verify-report.json`,
+`scan-report.json`, and `manifest.json` indexing them. In production this is
+SharePoint via Graph, same folder layout.
+
+Say the quiet part: **these are derived copies.** Verification is only meaningful
+against the registry referrers.
+
+### 6. Negative test — the gate blocks a promotion (3 min)
+
+Real DHI, real failure. Alpine DHI ships no OpenVEX, so with VEX required:
+
+```bash
+REQUIRE_VEX=1 make resolve sync verify REPO=dhi-node TAG=24-alpine
+```
+
+```
+[FAIL] required attestations MISSING: ["vex"] -- found ["provenance","sbom"] across 14 referrers
+ERROR verify gate failed -- image stays in quarantine, nothing promoted
+```
+
+Then prove it did not sneak through:
+
+```bash
+make promote REPO=dhi-node TAG=24-alpine      # refuses; exit 1
+regctl manifest head us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node:24-alpine  # 404
+```
+
+For a scan-gate failure instead, `make demo-fail` scans with VEX suppressed so
+un-VEXed HIGH/CRITICAL findings block promotion.
+
+---
 
 ## Offline tests
 
 ```bash
-make test    # 35 assertions, no network / registry / cloud credentials
+make test    # 49 assertions, no network / registry / cloud credentials
 make lint    # shellcheck -x
 ```
 
-**`tests/test-classify.sh`** (22) exercises the attestation classifier — the logic
-the verify gate's pass/fail rests on — against synthetic referrer indexes. The
-fixtures cover *both* storage conventions DHI might use (`artifactType` carries
-the type, vs. BuildKit-style predicate annotations), plus the missing-VEX and
-zero-referrer failure cases.
-
-**`tests/test-referrers-copy.sh`** (13) tests the referrers mechanics for real.
-regctl talks to `ocidir://` OCI layouts through the same code path it uses for a
-registry, so the DHI topology is reproduced on local disk — image in one repo,
-attestations in another — and the actual copy is exercised. It pins down:
-
-| Behaviour | Why it matters |
+| Suite | Covers |
 |---|---|
-| Querying referrers without `--external` returns **0, and does not error** | The pipeline's central failure mode: a mirror that looks successful while dropping every attestation |
-| Naive `image copy` → digest preserved, **0 attestations** | What a normal mirror does to DHI |
-| `--referrers --referrers-src` → digest preserved, **3 attestations** | What this pipeline does instead |
-| Attestations are **native** referrers at the target | GAR consumers need no `--external`, unlike the source |
-| An annotation-free in-toto referrer needs its **payload opened** | Descriptor-only classification reports valid SLSA provenance as missing |
+| `test-classify.sh` (26) | Attestation classification under both storage conventions, missing-VEX, zero-referrer, `REQUIRE_VEX` policy override |
+| `test-referrers-copy.sh` (13) | Real `regctl` copies between `ocidir://` layouts: the silent `--external` failure, naive-copy attestation loss, native referrers at the target, payload-level type resolution |
+| `test-gate-safety.sh` (10) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest |
 
-That last row is why `classify_referrers_deep` exists — see
-[Deep classification](#deep-classification).
-
-## Deep classification
-
-A referrer can advertise nothing useful about itself. `artifactType:
-application/vnd.in-toto+json` with no annotations at all is a valid way to attach
-SLSA provenance, and it is indistinguishable from an SBOM without opening it.
-
-So the verify gate resolves those by fetching the payload and reading
-`.predicateType` from the in-toto Statement (or, for Docker/BuildKit attestation
-manifests, the `in-toto.io/predicate-type` annotation on the manifest's layers).
-Measured against a real referrer set:
-
-```
-shallow (descriptors only):  groupsMissing = ["provenance"]   -> gate FAILS on valid provenance
-deep    (payload opened):    groupsMissing = []               -> gate correct
-```
-
-`verify-report.json` records `deepResolved: true` per artifact, so the report
-shows *how* each claim was established rather than only that it was.
+`test-gate-safety.sh` exists because of a real bug: a scan stage died before
+writing its result, the previous run's `pass` was still in the manifest, and the
+pipeline promoted an image carrying a CRITICAL CVE with exit code 0. A crashing
+gate was indistinguishable from a passing one. Gates now mark themselves `running`
+before anything that can fail, an EXIT trap converts that to `error`, and verdicts
+record the digest they apply to.
 
 ## Teardown
 
@@ -216,17 +297,13 @@ make clean-remote CONFIRM=yes       # delete GAR images + evidence objects
 make tf-destroy                     # remove the infrastructure
 ```
 
-## Current status
+The Workload Identity Pool is **soft-deleted for 30 days**. Terraform removes it
+cleanly, but re-applying with the same `wif_pool_id` inside that window fails —
+change the ID if you need to redeploy immediately.
 
-Built and validated offline:
+## Adapting this for a customer
 
-- [x] Toolchain (regctl, regsync, trivy, grype, cosign, docker scout, shellcheck)
-- [x] Shared library, config precedence, run-manifest contract
-- [x] Attestation classifier + 22 passing unit tests, shellcheck clean
-- [ ] Terraform (written; `apply` pending GCP credentials)
-- [ ] Stage scripts 00–50
-- [ ] CI workflow
-- [ ] End-to-end run against real DHI attestations
-
-`gcloud` and `terraform` are not yet installed in the dev sandbox — their
-download hosts (`dl.google.com`, `releases.hashicorp.com`) are firewall-blocked.
+[docs/customer-adaptation.md](docs/customer-adaptation.md) — OAT rotation,
+webhook-driven sync, SharePoint via Graph, VPC-SC and separate projects, FIPS tag
+filtering, and what to expect from scanners until the OSV feed cutover improves
+DHI support.
