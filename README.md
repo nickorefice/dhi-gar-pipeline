@@ -377,3 +377,8 @@ change the ID if you need to redeploy immediately.
 webhook-driven sync, SharePoint via Graph, VPC-SC and separate projects, FIPS tag
 filtering, and what to expect from scanners until the OSV feed cutover improves
 DHI support.
+
+## License
+
+[Apache-2.0](LICENSE). Adapt freely — that is what this POC is for. The design
+invariants above are the parts worth keeping intact.
