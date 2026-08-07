@@ -110,6 +110,10 @@ evidence: ## 50 Export SBOM/VEX/provenance + reports to the evidence bucket
 .PHONY: all
 all: resolve sync verify scan promote evidence ## Full pipeline, stopping at the first failed gate
 
+.PHONY: check
+check: ## Which configured tags differ from prod (the scheduled poll's cheap pre-check)
+	@./scripts/check-current.sh
+
 .PHONY: inspect
 inspect: ## Diagnostic: where does DHI actually keep attestations, and of what type
 	@./scripts/90-inspect-referrers.sh

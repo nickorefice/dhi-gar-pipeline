@@ -1,16 +1,22 @@
 name: Sync DHI to GAR
 
 # Triggers:
-#   repository_dispatch -- event-driven, from the Docker Hub webhook relay. This is
-#                          the production path: a mirrored DHI repo continuously
-#                          receives new tags, and the webhook gates each one within
-#                          minutes of it landing.
-#   workflow_dispatch   -- on demand, for the demo and one-off syncs
-#   schedule            -- daily RECONCILIATION BACKSTOP, not the primary trigger.
-#                          Webhook deliveries get dropped; a daily sweep over
-#                          sync-config.json catches whatever the event stream missed.
-#
-# See relay/README.md for the webhook and relay setup.
+#   schedule            -- THE POC'S OPERATIVE TRIGGER: a daily poll. The plan job
+#                          runs scripts/check-current.sh (two HEAD requests per
+#                          tag) and builds a matrix of only the tags whose
+#                          upstream digest differs from prod, so an all-current
+#                          day costs one short plan job (~1 min) and the full
+#                          pipeline runs only when something actually changed.
+#                          Worst-case latency is ~24h; tighten the cron (e.g.
+#                          "7,37 * * * *" for 30-min polls, ~1,450 Actions
+#                          min/month) or deploy the relay if that matters. Note
+#                          GitHub disables schedules after 60 days of repository
+#                          inactivity -- re-enable in the Actions UI.
+#   repository_dispatch -- event-driven path via the Docker Hub webhook relay
+#                          (relay/README.md). Built and validated end to end, but
+#                          NOT deployed for this POC: daily latency is acceptable
+#                          here, and it avoids a public endpoint.
+#   workflow_dispatch   -- on demand, for the demo and one-off syncs.
 
 on:
   repository_dispatch:
@@ -34,7 +40,7 @@ on:
         type: boolean
         default: false
   schedule:
-    # 07:15 UTC daily. Off the hour on purpose: hourly boundaries are when every
+    # Daily, 07:15 UTC. Off the hour on purpose: hourly boundaries are when every
     # other scheduled job in the world contends for runners.
     - cron: "15 7 * * *"
 
@@ -67,6 +73,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Scheduled ticks compare digests before deciding anything, which needs
+      # regctl and a GAR token. Dispatch-driven runs skip all three steps -- they
+      # were asked for explicitly and always run.
+      - name: Install regctl (schedule only)
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /usr/local/bin/regctl \
+            https://github.com/regclient/regclient/releases/download/v0.11.5/regctl-linux-amd64
+          chmod +x /usr/local/bin/regctl
+
+      - id: auth-plan
+        name: Authenticate to GCP (WIF, schedule only)
+        if: github.event_name == 'schedule'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
       - id: build
         name: Build the tag matrix
         env:
@@ -81,6 +107,14 @@ jobs:
           IN_SKIP_VEX: ${{ github.event.inputs.skip_vex || 'false' }}
           DISPATCH_REPO: ${{ github.event.client_payload.repo }}
           DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          # For check-current.sh on scheduled ticks.
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GAR_LOCATION: ${{ vars.GAR_LOCATION }}
+          GAR_PROD_REPO: ${{ vars.GAR_PROD_REPO }}
+          DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
+          GAR_ACCESS_TOKEN: ${{ steps.auth-plan.outputs.access_token }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -103,6 +137,36 @@ jobs:
               if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
                 echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.json; nothing to do"
               fi
+              ;;
+            schedule)
+              # The fast poll: only tags whose upstream digest differs from prod
+              # make it into the matrix. An all-current tick produces an empty
+              # matrix and the sync job skips entirely.
+              #
+              # check-current exits 3 when an upstream digest could not be
+              # resolved (dead credential, removed tag). Its stdout is still
+              # authoritative for what it DID determine, so the run continues
+              # with that -- but annotated, because a poll that silently rots is
+              # indistinguishable from "no new tags, ever".
+              if stale="$(./scripts/check-current.sh)"; then
+                :
+              else
+                echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
+              fi
+              matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
+              {
+                if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
+                  echo "### Poll: everything current"
+                  echo ""
+                  echo "No configured tag differs from prod. Nothing to do."
+                else
+                  echo "### Poll: sync needed"
+                  echo ""
+                  echo "| Tag | Reason | Upstream digest |"
+                  echo "|---|---|---|"
+                  jq -r '.[] | "| \(.repo):\(.tag) | \(.reason) | `\(.srcDigest[0:29])...` |"' <<<"$stale"
+                fi
+              } >>"$GITHUB_STEP_SUMMARY"
               ;;
             *)
               matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"

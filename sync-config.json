@@ -1,7 +1,9 @@
 {
   "_comment": [
-    "Tags the scheduled run syncs. The workflow builds a matrix from this file, so",
-    "adding a tag is a one-line change reviewed like any other.",
+    "Tags the scheduled poll keeps in sync. Every 30 minutes the plan job runs",
+    "scripts/check-current.sh over this list and syncs only the entries whose",
+    "upstream digest differs from prod -- so adding a tag here is a one-line,",
+    "reviewable change, and a quiet poll tick costs seconds.",
     "",
     "Tag choice is not cosmetic. Observed on nicksdemoorg/dhi-node:",
     "  - debian-based tags ship OpenVEX; alpine-based ones do not. Without VEX the",
@@ -12,14 +14,18 @@
     "  - -fips and -sfw-ent carry extra attestations (dhi/fips, dhi/stig).",
     "",
     "requireVex fails the verify gate when OpenVEX is absent. Set it on tags where",
-    "policy demands VEX and the base image provides it."
+    "policy demands VEX and the base image provides it.",
+    "",
+    "24-alpine is deliberately NOT listed. It is the manual negative-test tag",
+    "(REQUIRE_VEX=1 make verify REPO=dhi-node TAG=24-alpine): with requireVex false",
+    "the poll would quietly promote it out of quarantine and flatten the demo's",
+    "gate-blocked example; with true it would fail every 30 minutes. Auto-syncing",
+    "a tag that exists to demonstrate failure is a category error."
   ],
   "tags": [
     { "repo": "dhi-node", "tag": "26-debian13", "requireVex": true,
       "note": "current Node 26 on Debian 13; ships OpenVEX" },
     { "repo": "dhi-node", "tag": "24-debian13", "requireVex": true,
-      "note": "Node 24 LTS on Debian 13; ships OpenVEX" },
-    { "repo": "dhi-node", "tag": "24-alpine", "requireVex": false,
-      "note": "Alpine variant; no OpenVEX upstream, so VEX stays advisory here" }
+      "note": "Node 24 LTS on Debian 13; ships OpenVEX" }
   ]
 }

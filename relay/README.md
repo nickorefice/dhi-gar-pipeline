@@ -1,7 +1,21 @@
 # Docker Hub webhook → pipeline trigger
 
+> **Status: built and validated, deliberately NOT deployed in this POC.**
+> The full path was exercised against real infrastructure — a real Docker Hub
+> payload posted at the relay produced a `204` from GitHub, a
+> `repository_dispatch` run, and a green pipeline for `dhi-node:24-debian13`.
+> The POC's operative trigger is instead the **daily scheduled poll** in
+> `sync-dhi.yaml`: `scripts/check-current.sh` compares upstream digests against
+> prod and runs the pipeline only for tags that changed. That gives ~24h
+> worst-case latency with **zero public surface and no new secrets**.
+>
+> Deploy this relay when (a) minute-level latency becomes part of the story, and
+> (b) you have confirmed a *mirror sync* actually fires webhooks — see
+> [Known limitations](#known-limitations). Everything below is the runbook for
+> that moment.
+
 Fires the sync pipeline within minutes of a new tag landing in the mirrored DHI
-repository, instead of waiting up to a day for the cron.
+repository, instead of waiting for the scheduled poll.
 
 ```
 Docker Hub mirror gets a new tag
@@ -137,13 +151,13 @@ curl -X POST -H 'Content-Type: application/json' \
 | `404` | Wrong or missing secret path |
 | `502` | GitHub rejected the dispatch — surfaced so Hub records a failure and it can be retried, rather than silently dropping a real new tag |
 
-## Keep the cron
+## Keep the cron either way
 
-The schedule in `sync-dhi.yaml` stays as a **reconciliation backstop**, not the
-primary trigger. Webhook deliveries get dropped, relays get redeployed, and Docker
-Hub does not guarantee delivery. A daily sweep over `sync-config.json` catches
-whatever the event stream missed. `regsync check` suits the same role if you would
-rather reconcile declaratively.
+In this POC the daily poll IS the trigger. If you deploy the relay, the poll
+demotes to a **reconciliation backstop** — do not remove it. Webhook deliveries
+get dropped, relays get redeployed, and Docker Hub does not guarantee delivery.
+A daily sweep over `sync-config.json` catches whatever the event stream missed;
+`regsync check` suits the same role if you would rather reconcile declaratively.
 
 ## Known limitations
 

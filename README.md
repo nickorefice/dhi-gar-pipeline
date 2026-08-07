@@ -58,10 +58,15 @@ Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemo
                                      ← SBOMs, provenance, VEX, gate reports
 ```
 
-**Triggering:** a Docker Hub webhook on the mirrored repo fires the pipeline within
-minutes of a new tag, via a relay that translates the webhook into a
-`repository_dispatch`. The daily cron remains as a reconciliation backstop. See
-[relay/README.md](relay/README.md).
+**Triggering (POC):** a daily scheduled poll. The plan job runs
+`scripts/check-current.sh` — two HEAD requests per configured tag — and syncs only
+tags whose upstream digest differs from prod, so an all-current day is a ~1-minute
+no-op (`make check` shows the same comparison locally). A Docker Hub
+webhook→`repository_dispatch` relay is **built and validated but not deployed**:
+Docker Hub cannot call the GitHub API directly (no custom headers, fixed payload,
+no query-param tokens), so event-driven triggering needs a public relay endpoint,
+which this POC deliberately avoids. See [relay/README.md](relay/README.md) for the
+runbook when minute-level latency matters.
 
 | Stage | Script | Does |
 |---|---|---|

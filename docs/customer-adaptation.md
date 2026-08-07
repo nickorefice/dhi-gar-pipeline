@@ -34,13 +34,21 @@ Identity Federation issues short-lived credentials per run, and there is no key.
 
 ---
 
-## 2. Trigger: Docker Hub webhook, with cron as a backstop
+## 2. Trigger: polling now, webhook when latency matters
 
-**Implemented** — see [relay/README.md](../relay/README.md). A webhook on the
-mirrored repository is relayed to `repository_dispatch`, so a new tag is gated
-within minutes instead of up to a day.
+**The POC runs on a daily digest-compare poll** (`scripts/check-current.sh` in the
+plan job): zero public surface, no new secrets, and immune to the open question of
+whether mirror syncs fire webhooks at all. The webhook relay is **built and
+validated end to end but not deployed** — see [relay/README.md](../relay/README.md)
+for the deployment runbook.
 
-Three things about this are worth knowing before you build it yourself.
+A webhook cannot reach GitHub Actions directly: Docker Hub lets you configure only
+a destination URL (no `Authorization` header), GitHub removed query-param token
+auth in 2021, and the `repository_dispatch` body shape is fixed. So event-driven
+triggering always means hosting a relay that holds a GitHub credential. Switch to
+it when a new DHI build sitting unmirrored for up to a day is unacceptable.
+
+Three things about the webhook path worth knowing before you deploy it.
 
 **[observed] Docker Hub sends no HMAC, signature, or secret header.** There is
 nothing to verify, so the URL is the only credential, and Cloud Run must allow
