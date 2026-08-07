@@ -380,5 +380,9 @@ DHI support.
 
 ## License
 
-[Apache-2.0](LICENSE). Adapt freely — that is what this POC is for. The design
-invariants above are the parts worth keeping intact.
+[Apache-2.0](LICENSE). This is **example code — a worked reference, not a product
+to run in production as-is**. Use it to see every mechanism working and to avoid
+re-discovering the findings above, then build the equivalent inside your own
+environment and review processes; the design invariants are the parts worth
+carrying into any reimplementation. POC trade-offs are deliberately left in and
+catalogued in [docs/customer-adaptation.md](docs/customer-adaptation.md).
