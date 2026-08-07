@@ -1,0 +1,41 @@
+[
+  {
+    "_note": "Shape of Trivy's .Results[].Packages[] with --list-all-pkgs. SrcName is the source->binary link the normaliser needs; the PURL is what the scanner matches on.",
+    "Name": "libc6",
+    "Version": "2.41",
+    "SrcName": "glibc",
+    "SrcVersion": "2.41",
+    "PURL": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u3%2Bdhi1?arch=amd64&distro=debian-13.6"
+  },
+  {
+    "Name": "libssl3t64",
+    "Version": "3.5.6",
+    "SrcName": "openssl",
+    "SrcVersion": "3.5.6",
+    "PURL": "pkg:deb/debian/libssl3t64@3.5.6-1~deb13u2%2Bdhi1?arch=amd64&distro=debian-13.6"
+  },
+  {
+    "_note": "one source package can produce several binaries -- both must be mapped",
+    "Name": "openssl-provider-legacy",
+    "Version": "3.5.6",
+    "SrcName": "openssl",
+    "SrcVersion": "3.5.6",
+    "PURL": "pkg:deb/debian/openssl-provider-legacy@3.5.6-1~deb13u2%2Bdhi1?arch=amd64&distro=debian-13.6"
+  },
+  {
+    "_note": "epoch lives in a ?epoch= qualifier here, not inline in the version",
+    "Name": "zlib1g",
+    "Version": "1.3.dfsg+really1.3.1",
+    "SrcName": "zlib",
+    "SrcVersion": "1.3.dfsg+really1.3.1",
+    "PURL": "pkg:deb/debian/zlib1g@1.3.dfsg%2Breally1.3.1-1%2Bdhi2?arch=amd64&distro=debian-13.6&epoch=1"
+  },
+  {
+    "_note": "unrelated package: must never be mapped to any statement above",
+    "Name": "nodejs",
+    "Version": "26.6.0",
+    "SrcName": "nodejs",
+    "SrcVersion": "26.6.0",
+    "PURL": "pkg:deb/debian/nodejs@26.6.0-1?arch=amd64&distro=debian-13.6"
+  }
+]

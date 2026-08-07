@@ -143,8 +143,12 @@ run_trivy() { # run_trivy <output-file> [extra args...]
 
 # Pass 1 -- BASELINE, no VEX. This is what an ordinary scanner reports about a
 # hardened image, and it is the number a customer is used to seeing.
-log "trivy pass 1/2: baseline (no VEX)"
-if ! run_trivy "$TRIVY_BASELINE_JSON"; then
+#
+# --list-all-pkgs is not for reporting: it emits .Results[].Packages[] with SrcName,
+# which is the source -> binary package mapping the VEX normaliser needs. Getting it
+# from this pass avoids a third scan.
+log "trivy pass 1/2: baseline (no VEX, with package inventory)"
+if ! run_trivy "$TRIVY_BASELINE_JSON" --list-all-pkgs; then
   err "trivy failed to run:"
   sed 's/^/    /' "$TRIVY_BASELINE_JSON.err" >&2
   summary "### ❌ Scan gate error"
@@ -155,11 +159,75 @@ if ! run_trivy "$TRIVY_BASELINE_JSON"; then
   die "trivy could not scan $SCAN_REF (tooling failure, NOT a clean bill of health)"
 fi
 
+# ---------------------------------------------------------------------------
+# Normalise the VEX so the scanners actually apply it.
+#
+# THIS STEP IS THE DIFFERENCE BETWEEN A VEX-AWARE GATE AND A DECORATIVE ONE.
+#
+# DHI VEX identifies products by Debian SOURCE package PURL
+# (pkg:deb/debian/glibc@...), while Trivy and Grype match on the BINARY package
+# they found (pkg:deb/debian/libc6@...) with different qualifiers. Neither scanner
+# applies the statement. Measured on dhi-node:26-debian13:
+#
+#   original VEX -> Trivy 12 findings, Grype 6, grype ignoredMatches 0
+#   normalised   -> Trivy  0 findings, Grype 0
+#
+# Every one of those was a CVE the vendor had already declared not_affected. Without
+# this step the gate reports them as real, and the whole "DHI VEX reduces noise"
+# claim is false in exactly the way that is hardest to notice: the scan runs, VEX is
+# passed, no error appears, and nothing is suppressed.
+#
+# See scripts/lib/vex-normalize.jq: statuses and justifications are copied verbatim,
+# only product identifiers are added, and a statement whose version does not match is
+# reported unmatched rather than guessed at.
+# ---------------------------------------------------------------------------
+VEX_ARGS_FILES=()
+VEX_MAPPINGS='[]'
+VEX_UNMATCHED='[]'
+
+if (( ! SKIP_VEX )) && (( VEX_COUNT > 0 )); then
+  step "30b2 normalise VEX to scanner package identifiers"
+
+  PKG_INVENTORY="$RUN_DIR/package-inventory.json"
+  jq '[.Results[]?.Packages[]? | {Name, Version, SrcName, SrcVersion, PURL: .Identifier.PURL}]' \
+    "$TRIVY_BASELINE_JSON" >"$PKG_INVENTORY" 2>/dev/null || printf '[]' >"$PKG_INVENTORY"
+  log "scanner package inventory: $(jq -r 'length' "$PKG_INVENTORY") package(s)"
+
+  if [[ "$(jq -r 'length' "$PKG_INVENTORY")" == "0" ]]; then
+    warn "no package inventory from Trivy -- cannot normalise VEX, passing it through as-is."
+    warn "expect the vendor's statements NOT to be applied (see scripts/lib/vex-normalize.jq)"
+    for f in "${VEX_FILES[@]:-}"; do [[ -n "$f" ]] && VEX_ARGS_FILES+=("$f"); done
+  else
+    idx=0
+    for f in "${VEX_FILES[@]:-}"; do
+      [[ -n "$f" && -f "$f" ]] || continue
+      idx=$((idx + 1))
+      norm="${f%.json}.normalized.json"
+      full="$RUN_DIR/vex-normalize-$(printf '%02d' "$idx").json"
+      if jq -f "$LIB_DIR/vex-normalize.jq" \
+           --argjson packages "$(cat "$PKG_INVENTORY")" "$f" >"$full" 2>/dev/null; then
+        jq '.vex' "$full" >"$norm"
+        m="$(jq -c '.mappings' "$full")"; u="$(jq -c '.unmatched' "$full")"
+        VEX_MAPPINGS="$(jq -c --argjson a "$VEX_MAPPINGS" --argjson b "$m" '$a + $b' <<<'null')"
+        VEX_UNMATCHED="$(jq -c --argjson a "$VEX_UNMATCHED" --argjson b "$u" '$a + $b' <<<'null')"
+        log "  ${f##*/}: $(jq -r '.mappings|length' "$full") statement(s) remapped, $(jq -r '.unmatched|length' "$full") unmatched"
+        jq -r '.mappings[] | "      " + .vulnerability + ": " + (.from|join(",")) + " -> " + (.to|join(", "))' "$full" >&2
+        if [[ "$(jq -r '.unmatched|length' "$full")" != "0" ]]; then
+          warn "  statements that could not be mapped (NOT applied, deliberately):"
+          jq -r '.unmatched[] | "      " + .vulnerability + ": wanted " + ([.wanted[] | .name + "@" + (.version // "?")] | join(", "))' "$full" >&2
+        fi
+        VEX_ARGS_FILES+=("$norm")
+      else
+        warn "  could not normalise ${f##*/} -- passing the original through"
+        VEX_ARGS_FILES+=("$f")
+      fi
+    done
+  fi
+fi
+
 # Pass 2 -- the GATE, with the vendor's VEX applied (unless --skip-vex).
 TRIVY_VEX_ARGS=()
-if (( ! SKIP_VEX )); then
-  for f in "${VEX_FILES[@]:-}"; do [[ -n "$f" ]] && TRIVY_VEX_ARGS+=(--vex "$f"); done
-fi
+for f in "${VEX_ARGS_FILES[@]:-}"; do [[ -n "$f" ]] && TRIVY_VEX_ARGS+=(--vex "$f"); done
 log "trivy pass 2/2: gate ($( (( SKIP_VEX )) && echo 'VEX SUPPRESSED by --skip-vex' || echo "${#TRIVY_VEX_ARGS[@]} VEX arg(s)"))"
 
 # Expanded via an explicit length test, NOT "${ARR[@]:-}". On an empty array that
@@ -184,9 +252,18 @@ fi
 trivy_table >"$TRIVY_TXT" 2>/dev/null || true
 sed 's/^/    /' "$TRIVY_TXT" >&2 || true
 
+# Count exactly the severities the policy gates on, derived from SCAN_SEVERITY
+# rather than hardcoded. Hardcoding HIGH/CRITICAL here while passing --severity to
+# Trivy meant a stricter SCAN_SEVERITY changed what Trivy reported but not what the
+# gate counted -- so setting SCAN_SEVERITY=MEDIUM,HIGH,CRITICAL would have looked
+# applied while MEDIUM findings quietly never blocked anything.
+SEV_SET="$(printf '%s' "$SCAN_SEVERITY" | tr ',' '\n' | sed '/^$/d' | jq -R 'ascii_upcase' | jq -sc .)"
+log "gating severities: $SEV_SET"
+
 extract_findings() {
-  jq '[ (.Results // [])[] | (.Vulnerabilities // [])[]
-        | select(.Severity == "HIGH" or .Severity == "CRITICAL") ]' "$1"
+  jq --argjson sevs "$SEV_SET" \
+     '[ (.Results // [])[] | (.Vulnerabilities // [])[]
+        | select((.Severity // "" | ascii_upcase) | IN($sevs[])) ]' "$1"
 }
 
 BASELINE="$(extract_findings "$TRIVY_BASELINE_JSON")"
@@ -223,9 +300,25 @@ SUPPRESSED="$(jq -c --argjson gating "$GATING" --argjson vex "$VEX_INDEX" '
           vex: ($vex[.VulnerabilityID] // null) })' <<<"$BASELINE")"
 SUPPRESSED_COUNT="$(jq 'length' <<<"$SUPPRESSED")"
 
-log "HIGH/CRITICAL without VEX (baseline): $BASELINE_COUNT"
+log "findings without VEX (baseline)   : $BASELINE_COUNT"
 log "suppressed by vendor VEX            : $SUPPRESSED_COUNT"
-log "HIGH/CRITICAL gating the promotion  : $GATING_COUNT"
+log "findings gating the promotion     : $GATING_COUNT"
+
+# A VEX document that suppresses nothing is the failure mode this whole
+# normalisation step exists to prevent, and it is invisible in the numbers alone:
+# "0 suppressed" reads identically whether VEX worked and had nothing to do, or was
+# silently ignored. So say which one it was.
+if (( ! SKIP_VEX )) && (( VEX_COUNT > 0 )) && (( SUPPRESSED_COUNT == 0 )); then
+  if (( BASELINE_COUNT == 0 )); then
+    log "VEX suppressed nothing: the baseline was already clean at $SCAN_SEVERITY"
+    log "  (not evidence that VEX was applied -- there was nothing to apply it to)"
+  else
+    warn "VEX documents were supplied but suppressed NOTHING while $BASELINE_COUNT finding(s) remain."
+    warn "  That usually means the statements did not match the scanner's package identifiers."
+    warn "  Mapped statements: $(jq -r 'length' <<<"$VEX_MAPPINGS"), unmatched: $(jq -r 'length' <<<"$VEX_UNMATCHED")"
+    warn "  Inspect: $RUN_DIR/vex-normalize-*.json"
+  fi
+fi
 
 if (( SUPPRESSED_COUNT > 0 )); then
   jq -r '.[] | "    SUPPRESSED  " + .severity + "  " + .id + "  " + (.pkg // "?")
@@ -252,10 +345,10 @@ step "30c grype (second opinion, report-only)"
 GRYPE_JSON="$RUN_DIR/grype-report.json"
 GRYPE_COUNT="null"
 if command -v grype >/dev/null 2>&1; then
+  # The same normalised documents Trivy gets. Grype ignores the vendor's originals
+  # for the same reason Trivy does -- it matches on the binary package PURL.
   GRYPE_ARGS=("$SCAN_REF" --platform "$VERIFY_PLATFORM" -o json)
-  if (( ! SKIP_VEX )); then
-    for f in "${VEX_FILES[@]:-}"; do [[ -n "$f" ]] && GRYPE_ARGS+=(--vex "$f"); done
-  fi
+  for f in "${VEX_ARGS_FILES[@]:-}"; do [[ -n "$f" ]] && GRYPE_ARGS+=(--vex "$f"); done
   if grype "${GRYPE_ARGS[@]}" >"$GRYPE_JSON" 2>"$GRYPE_JSON.err"; then
     GRYPE_COUNT="$(jq '[ (.matches // [])[]
                          | select((.vulnerability.severity // "") | ascii_downcase
@@ -325,6 +418,8 @@ jq -n \
   --argjson baselineCount "$BASELINE_COUNT" \
   --argjson suppressedByVex "$SUPPRESSED_COUNT" \
   --argjson suppressedDetail "$SUPPRESSED" \
+  --argjson vexMappings "$VEX_MAPPINGS" \
+  --argjson vexUnmatched "$VEX_UNMATCHED" \
   --argjson grypeCount "${GRYPE_COUNT:-null}" \
   --arg compareStatus "$COMPARE_STATUS" \
   --argjson findings "$(jq '[ group_by(.VulnerabilityID)[] | .[0]
@@ -339,6 +434,11 @@ jq -n \
      vex: { documents: $vexDocuments,
             suppressedCount: $suppressedByVex,
             suppressed: $suppressedDetail,
+            normalization: {
+              remapped: $vexMappings,
+              unmatched: $vexUnmatched,
+              why: "DHI VEX names Debian SOURCE packages (pkg:deb/debian/glibc@...) while Trivy and Grype match the BINARY package they found (pkg:deb/debian/libc6@...). Without remapping, neither scanner applies the statements: measured 12 -> 12 Trivy findings and 6 -> 6 Grype findings on dhi-node:26-debian13. Statuses and justifications are copied verbatim; only product identifiers are added; version mismatches are reported unmatched rather than guessed."
+            },
             note: "suppressedCount is computed as (baseline findings - findings surviving VEX), not read from Trivy .ModifiedFindings, which is not populated for file-based VEX" },
      trivy: { baselineFindings: $baselineCount,
               gatingFindings: $gatingCount,

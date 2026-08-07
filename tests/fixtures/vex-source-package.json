@@ -1,0 +1,44 @@
+{
+  "_fixture": "Shape of a real DHI VEX document, reduced. Products are identified by Debian SOURCE package PURL with os_* qualifiers -- which is what scanners do NOT match on. Copied from nicksdemoorg/dhi-node:26-debian13.",
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://scout.docker.com/public/vex-test",
+  "author": "Docker Hardened Images <dhi@docker.com>",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": { "name": "CVE-2026-5435" },
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "products": [
+        { "@id": "pkg:deb/debian/glibc@2.41-12%2Bdeb13u3%2Bdhi1?os_distro=trixie&os_name=debian&os_version=13" },
+        { "@id": "pkg:deb/debian/glibc@2.41-12%2Bdeb13u3%2Bdhi1?os_name=debian&os_version=13" }
+      ]
+    },
+    {
+      "vulnerability": { "name": "CVE-2010-0928" },
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "products": [
+        { "@id": "pkg:deb/debian/openssl@3.5.6-1~deb13u2%2Bdhi1?os_name=debian&os_version=13" }
+      ]
+    },
+    {
+      "_note": "epoch case: the VEX writes 1: inline, the scanner PURL carries ?epoch=1",
+      "vulnerability": { "name": "CVE-2026-27171" },
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "products": [
+        { "@id": "pkg:deb/debian/zlib@1%3A1.3.dfsg%2Breally1.3.1-1%2Bdhi2?os_name=debian&os_version=13" }
+      ]
+    },
+    {
+      "_note": "version does NOT match the installed package -- must be reported unmatched, never guessed",
+      "vulnerability": { "name": "CVE-9999-0001" },
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "products": [
+        { "@id": "pkg:deb/debian/glibc@9.99-1?os_name=debian&os_version=13" }
+      ]
+    }
+  ]
+}

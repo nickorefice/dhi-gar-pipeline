@@ -133,25 +133,53 @@ cutover, which should broaden scanner ecosystem support for DHI's package
 metadata. Re-evaluate when that lands; the goal is to delete stage 30's scanner
 management, not to keep it forever.
 
-### [observed] Scanners disagree, and the disagreement is explainable
+### [observed] Neither scanner applies DHI's VEX as shipped
 
-On `dhi-node:26-debian13`, same digest, same platform:
+**This is the most consequential finding here.** Verify it in your own environment
+before trusting any VEX-aware gate, including this one.
+
+DHI identifies VEX products by Debian **source** package PURL. Trivy and Grype
+match on the **binary** package they discovered:
 
 ```
-Trivy  HIGH/CRITICAL: 0
-Grype  HIGH/CRITICAL: 6
+DHI VEX :  pkg:deb/debian/glibc@2.41-12+deb13u3+dhi1?os_distro=trixie&os_name=debian&os_version=13
+Trivy   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
+Grype   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6&upstream=glibc
 ```
 
-Three of Grype's findings are in `libc6 2.41-12+deb13u3+dhi1`, all `wont-fix`.
-The `+dhi1` suffix is Docker's patched build. Trivy understands the suffix and
-matches the patched version; Grype matches the unpatched upstream version instead
-and reports vulnerabilities that are not present.
+Different package name (source vs binary) and different qualifiers. Measured on
+`dhi-node:26-debian13`:
 
-This is the scanner ecosystem gap in concrete form, and it is why this pipeline
-gates on Trivy and treats Grype as a **report-only second opinion**. Before
-switching primary scanners, verify the candidate understands DHI version suffixes
-— otherwise a hardened image scores worse than the unhardened one it replaced,
-and the programme loses credibility on a tooling artefact.
+| | Trivy (all severities) | Grype (HIGH/CRIT) |
+|---|---|---|
+| VEX as shipped | 12 findings | 6, `ignoredMatches: 0` |
+| VEX normalised | **0** | **0** |
+
+All 12 were CVEs Docker had already declared `not_affected`. The scan ran, `--vex`
+was passed, no error was raised, and **nothing was suppressed**. The failure mode
+is a missing effect, not a wrong number — `0 suppressed` reads identically whether
+VEX worked with nothing to do or was ignored entirely.
+
+**Mitigation** (implemented in `scripts/lib/vex-normalize.jq`): remap each
+statement's products to the scanner's own identifiers, using the source → binary
+mapping in Trivy's `--list-all-pkgs` inventory (`SrcName`). Statuses and
+justifications are copied verbatim; a statement whose version does not match an
+installed package is reported unmatched and not applied.
+
+**What to check before adopting any scanner as your gate:**
+
+1. Scan a DHI image with and without its VEX. If the counts are identical and
+   there were findings to suppress, the VEX is not being applied.
+2. Check whether the scanner exposes the source → binary mapping at all (Trivy:
+   `SrcName` via `--list-all-pkgs`; Grype: `artifact.upstreams`). Without it, no
+   remapping is possible.
+3. Re-test after any scanner upgrade. This is version-specific behaviour, and a
+   scanner that starts honouring source PURLs makes the remapping redundant —
+   harmless, since it is additive, but worth removing.
+
+Also note the two scanners assign **different severities** to the same CVE:
+`CVE-2026-5435` is MEDIUM to Trivy and HIGH to Grype. A severity-threshold gate is
+therefore scanner-specific, which is a second reason Grype is report-only here.
 
 ### [observed] VEX is not present on every DHI tag
 

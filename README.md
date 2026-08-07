@@ -111,14 +111,64 @@ holds `{scanner, metadata}`; `scout/vulnerabilities/v0.1` holds a findings list
 with no status or justification fields. Deriving VEX from them would invent
 assessments the vendor never made.
 
-**Scanners disagree, explainably.** On the same digest: Trivy 0 HIGH/CRITICAL,
-Grype 6 — three of them in `libc6 2.41-12+deb13u3+dhi1`. The `+dhi1` suffix is
-Docker's patched build; Trivy understands it, Grype matches the unpatched upstream
-version. This is why Grype is report-only here. See
-[docs/customer-adaptation.md](docs/customer-adaptation.md).
+**Scanners do not apply DHI's VEX as shipped — this one is load-bearing.** DHI
+identifies VEX products by Debian **source** package PURL; Trivy and Grype match
+the **binary** package they found:
+
+```
+DHI VEX :  pkg:deb/debian/glibc@2.41-12+deb13u3+dhi1?os_distro=trixie&os_name=debian&os_version=13
+Trivy   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
+Grype   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6&upstream=glibc
+```
+
+Measured on `dhi-node:26-debian13`:
+
+| | Trivy findings | Grype HIGH/CRIT |
+|---|---|---|
+| VEX as shipped | **12** | **6** (`ignoredMatches: 0`) |
+| VEX normalised | **0** | **0** |
+
+Every one of those 12 was a CVE Docker had already declared `not_affected`. The
+scan ran, `--vex` was passed, no error appeared, and **nothing was suppressed** —
+the failure mode is a missing *effect*, not a wrong number. `30-scan.sh` therefore
+normalises VEX product identifiers before scanning (see [Making scanners actually
+ingest the VEX](#making-scanners-actually-ingest-the-vex)), and warns loudly if
+VEX suppresses nothing while findings remain.
 
 **GAR supports the OCI referrers API natively** — no `sha256-<digest>` fallback
 tags were created, so referrers round-trip through the real API.
+
+## Making scanners actually ingest the VEX
+
+`scripts/lib/vex-normalize.jq` re-expresses each VEX statement in the package
+identifiers the scanner emits, using the source → binary mapping from Trivy's own
+`--list-all-pkgs` inventory (`SrcName`). On a real DHI image:
+
+```
+scanner package inventory: 15 package(s)
+vex.openvex.01.json: 14 statement(s) remapped, 0 unmatched
+    CVE-2010-0928:  openssl -> libssl3t64, openssl-provider-legacy
+    CVE-2026-5435:  glibc   -> libc6
+    CVE-2026-27171: zlib    -> zlib1g
+```
+
+It handles one-source-to-many-binaries (`openssl` → 2 packages) and the epoch
+mismatch (VEX writes `1:` inline; the scanner PURL carries `?epoch=1`).
+
+**What it does not do.** Statuses, justifications and impact statements are copied
+verbatim; only product identifiers are *added*, originals retained. A statement
+whose version does not match an installed package is reported `unmatched` and
+**not** applied — guessing there would fabricate a vendor assessment, which is
+worse than applying no VEX. `tests/test-vex-normalize.sh` asserts all of this,
+including that no CVE is invented or dropped.
+
+With it in place, on `dhi-node:26-debian13` at all severities:
+
+```
+findings without VEX (baseline) : 12
+suppressed by vendor VEX        : 12     each with the vendor's justification
+findings gating the promotion   : 0
+```
 
 ## Prerequisites
 
@@ -272,7 +322,7 @@ un-VEXed HIGH/CRITICAL findings block promotion.
 ## Offline tests
 
 ```bash
-make test    # 49 assertions, no network / registry / cloud credentials
+make test    # 65 assertions, no network / registry / cloud credentials
 make lint    # shellcheck -x
 ```
 
@@ -281,6 +331,7 @@ make lint    # shellcheck -x
 | `test-classify.sh` (26) | Attestation classification under both storage conventions, missing-VEX, zero-referrer, `REQUIRE_VEX` policy override |
 | `test-referrers-copy.sh` (13) | Real `regctl` copies between `ocidir://` layouts: the silent `--external` failure, naive-copy attestation loss, native referrers at the target, payload-level type resolution |
 | `test-gate-safety.sh` (10) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest |
+| `test-vex-normalize.sh` (16) | Source→binary PURL remapping, one-to-many, epoch handling, version-mismatch refusal, and that no status/justification/CVE is ever altered |
 
 `test-gate-safety.sh` exists because of a real bug: a scan stage died before
 writing its result, the previous run's `pass` was still in the manifest, and the
