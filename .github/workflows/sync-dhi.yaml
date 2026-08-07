@@ -1,16 +1,20 @@
 name: Sync DHI to GAR
 
 # Triggers:
-#   workflow_dispatch  -- on demand, for the demo and for one-off syncs
-#   schedule           -- daily, over the tag list in sync-config.json
+#   repository_dispatch -- event-driven, from the Docker Hub webhook relay. This is
+#                          the production path: a mirrored DHI repo continuously
+#                          receives new tags, and the webhook gates each one within
+#                          minutes of it landing.
+#   workflow_dispatch   -- on demand, for the demo and one-off syncs
+#   schedule            -- daily RECONCILIATION BACKSTOP, not the primary trigger.
+#                          Webhook deliveries get dropped; a daily sweep over
+#                          sync-config.json catches whatever the event stream missed.
 #
-# A daily cron is the POC's stand-in for event-driven sync. In production a
-# customer would replace it with a Docker Hub webhook on the mirrored repository
-# relayed to repository_dispatch, so a new DHI build is gated within minutes
-# instead of up to a day later. Cron is used here because it needs no public
-# endpoint and makes the demo reproducible. See docs/customer-adaptation.md.
+# See relay/README.md for the webhook and relay setup.
 
 on:
+  repository_dispatch:
+    types: [dhi-tag-pushed]
   workflow_dispatch:
     inputs:
       repo:
@@ -37,7 +41,13 @@ on:
 concurrency:
   # Serialise per repo+tag. Two runs promoting the same tag concurrently could
   # interleave a verified digest with a different one being copied.
-  group: sync-dhi-${{ github.event.inputs.repo || 'scheduled' }}-${{ github.event.inputs.tag || 'all' }}
+  #
+  # client_payload is included so webhook-driven runs for DIFFERENT tags proceed in
+  # parallel. Keying only on inputs would collapse every webhook delivery into one
+  # group and serialise unrelated tags behind each other.
+  group: >-
+    sync-dhi-${{ github.event.inputs.repo || github.event.client_payload.repo || 'scheduled' }}-${{
+    github.event.inputs.tag || github.event.client_payload.tag || 'all' }}
   cancel-in-progress: false
 
 permissions:
@@ -53,28 +63,60 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
+      count: ${{ steps.build.outputs.count }}
     steps:
       - uses: actions/checkout@v4
 
       - id: build
         name: Build the tag matrix
+        env:
+          # Via env, not inlined into the script: a webhook-supplied tag is
+          # untrusted input, and interpolating it directly into a shell command
+          # would be a script-injection hole reachable from anyone who has the
+          # relay URL.
+          EVENT_NAME: ${{ github.event_name }}
+          IN_REPO: ${{ github.event.inputs.repo }}
+          IN_TAG: ${{ github.event.inputs.tag }}
+          IN_REQUIRE_VEX: ${{ github.event.inputs.require_vex || 'false' }}
+          IN_SKIP_VEX: ${{ github.event.inputs.skip_vex || 'false' }}
+          DISPATCH_REPO: ${{ github.event.client_payload.repo }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            matrix="$(jq -cn \
-              --arg repo '${{ github.event.inputs.repo }}' \
-              --arg tag '${{ github.event.inputs.tag }}' \
-              --argjson rv ${{ github.event.inputs.require_vex || false }} \
-              --argjson sv ${{ github.event.inputs.skip_vex || false }} \
-              '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
-          else
-            matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
-          fi
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
+                --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
+                '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+              ;;
+            repository_dispatch)
+              # The relay already allow-listed repo and tag, but this job re-checks
+              # against sync-config.json so policy lives in one reviewed place. A
+              # tag the relay would forward but config does not list produces an
+              # empty matrix rather than an unreviewed sync.
+              [[ "$DISPATCH_REPO" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid repo in client_payload"; exit 1; }
+              [[ "$DISPATCH_TAG"  =~ ^[A-Za-z0-9._-]+$   ]] || { echo "::error::invalid tag in client_payload"; exit 1; }
+              matrix="$(jq -c --arg repo "$DISPATCH_REPO" --arg tag "$DISPATCH_TAG" \
+                '{include: [.tags[] | select(.repo == $repo and .tag == $tag)
+                            | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' \
+                sync-config.json)"
+              if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
+                echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.json; nothing to do"
+              fi
+              ;;
+            *)
+              matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
+              ;;
+          esac
           echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+          # An empty matrix makes the sync job error rather than skip, so the count
+          # gates the job instead.
+          echo "count=$(jq -r '.include | length' <<<"$matrix")" >>"$GITHUB_OUTPUT"
           echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex)"' <<<"$matrix"
 
   sync:
     needs: plan
+    if: needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false          # one tag failing its gate must not cancel the others

@@ -1,0 +1,26 @@
+{
+  "_fixture": "Docker Hub webhook payload, per https://docs.docker.com/docker-hub/repos/manage/webhooks/ . callback_url is present because Hub still sends it, but it is a legacy field that is no longer supported and the relay ignores it.",
+  "callback_url": "https://registry.hub.docker.com/u/nicksdemoorg/dhi-node/hook/legacy/",
+  "push_data": {
+    "pushed_at": 1786060800,
+    "pusher": "dhi-mirror",
+    "tag": "26-debian13"
+  },
+  "repository": {
+    "comment_count": 0,
+    "date_created": 1785000000,
+    "description": "Mirrored Docker Hardened Image: node",
+    "dockerfile": "",
+    "full_description": "",
+    "is_official": false,
+    "is_private": true,
+    "is_trusted": false,
+    "name": "dhi-node",
+    "namespace": "nicksdemoorg",
+    "owner": "nicksdemoorg",
+    "repo_name": "nicksdemoorg/dhi-node",
+    "repo_url": "https://hub.docker.com/r/nicksdemoorg/dhi-node",
+    "star_count": 0,
+    "status": "Active"
+  }
+}
