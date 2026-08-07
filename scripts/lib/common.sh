@@ -380,9 +380,12 @@ fetch_referrers() {
 classify_referrers() {
   local referrers_json="$1" deep="${2:-}"
   [[ -n "$deep" ]] || deep='{}'
+  local require_vex=false
+  [[ "${REQUIRE_VEX:-0}" == "1" ]] && require_vex=true
   jq -f "$CLASSIFY_JQ" \
      --argjson types "$(cat "$ATTESTATION_TYPES")" \
      --argjson deep "$deep" \
+     --argjson requireVex "$require_vex" \
      "$referrers_json"
 }
 

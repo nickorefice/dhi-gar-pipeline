@@ -72,13 +72,26 @@ def classify($d):
   ] ) as $artifacts
 
 | ( $artifacts | map(select(.group != null) | .group) | unique ) as $present
-| ( $types.requiredGroups - $present ) as $missing
+
+# requiredGroups fail the gate. expectedGroups only warn, because their presence
+# is a property of the upstream image rather than of the copy: OpenVEX ships on
+# debian-based DHI tags and not on alpine ones, so requiring it would fail every
+# Alpine image for something the pipeline neither caused nor can fix.
+#
+# REQUIRE_VEX=1 promotes vex to a hard requirement for a customer whose policy
+# demands it -- the choice belongs to policy, not to this file.
+| ( ($types.requiredGroups // [])
+    + (if ($requireVex // false) then ["vex"] else [] end) | unique ) as $required
+| ( $required - $present ) as $missing
+| ( (($types.expectedGroups // []) - $required) - $present ) as $expectedMissing
 
 | {
     artifacts:     $artifacts,
     total:         ($artifacts | length),
     groupsPresent: $present,
+    groupsRequired: $required,
     groupsMissing: $missing,
+    groupsExpectedMissing: $expectedMissing,
     unclassified:  ($artifacts | map(select(.class == "unclassified")) | length),
     deepResolvedCount: ($artifacts | map(select(.deepResolved)) | length)
   }

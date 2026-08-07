@@ -1,91 +1,169 @@
 {
   "_comment": [
-    "Classification table for OCI referrer descriptors. The verify gate does not",
-    "hardcode artifact types in shell -- it matches descriptors against this table,",
-    "so tightening the matchers after observing a real DHI repo is a data change.",
+    "Classification table for OCI referrer descriptors, built from OBSERVED DHI",
+    "attestations rather than from spec assumptions. Source of truth for this table:",
+    "scripts/90-inspect-referrers.sh run against nicksdemoorg/dhi-node across six",
+    "tags (alpine, debian, fips, sfw-ent variants) on 2026-08-07.",
     "",
-    "Two conventions are covered, because DHI/Scout may use either:",
-    "  1. Direct artifact referrers -- descriptor.artifactType is the document type",
-    "     (e.g. application/spdx+json).",
-    "  2. BuildKit/Docker attestation manifests -- descriptor.artifactType is a",
-    "     generic in-toto or Docker attestation type, and the real predicate lives",
-    "     in an annotation (in-toto.io/predicate-type) either on the descriptor or",
-    "     on the layers of the referenced manifest. scripts/90-inspect-referrers.sh",
-    "     resolves that second level and reports what is actually there.",
+    "WHAT WAS ACTUALLY FOUND, and why it shapes this file:",
     "",
-    "predicateTypes match by PREFIX, so versioned URIs such as",
-    "https://slsa.dev/provenance/v1 match the entry https://slsa.dev/provenance.",
+    "1. Every DHI attestation carries artifactType application/vnd.in-toto+json.",
+    "   NOTHING is distinguishable by artifactType. The document type appears only",
+    "   in the in-toto.io/predicate-type annotation, so predicateTypes below do all",
+    "   the real work and artifactTypes are near-useless for DHI.",
     "",
-    "requiredGroup drives the gate: a group is satisfied if ANY class in it is",
-    "present. Phase 3 requires groups sbom + provenance + vex."
+    "2. Attestations attach to PER-PLATFORM manifest digests, not to the index.",
+    "   Querying referrers on the index digest returns ZERO. 20-verify.sh queries",
+    "   both the index and platform digests and merges.",
+    "",
+    "3. OpenVEX is NOT universal. Observed on debian-based tags (26-debian13,",
+    "   22-debian13-fips) and ABSENT on alpine-based tags (24-alpine,",
+    "   24-alpine-fips, 24-alpine-sfw-ent-dev). VEX therefore sits in",
+    "   expectedGroups, not requiredGroups: requiring it would fail every Alpine",
+    "   DHI image. Set REQUIRE_VEX=1 to promote it to a hard requirement.",
+    "",
+    "4. Neither vulnerability attestation contains VEX assessments.",
+    "   in-toto/vulns/v0.2 holds only {scanner, metadata}; scout/vulnerabilities",
+    "   holds a plain findings list with CVSS but no status/justification fields.",
+    "   They are NOT a substitute for VEX and are deliberately not mapped to the",
+    "   vex group -- deriving VEX from a findings list would invent claims the",
+    "   vendor never made.",
+    "",
+    "predicateTypes match by PREFIX, so https://slsa.dev/provenance covers both",
+    "/v0.2 and /v1 without listing each version."
   ],
-  "requiredGroups": ["sbom", "provenance", "vex"],
+
+  "requiredGroups": ["sbom", "provenance"],
+  "expectedGroups": ["vex"],
+
   "classes": [
     {
       "id": "sbom-spdx",
       "label": "SPDX SBOM",
       "requiredGroup": "sbom",
       "evidenceFilename": "sbom.spdx.json",
-      "artifactTypes": [
-        "application/spdx+json",
-        "application/vnd.spdx+json",
-        "text/spdx+json"
-      ],
-      "predicateTypes": [
-        "https://spdx.dev/Document"
-      ]
+      "artifactTypes": ["application/spdx+json", "application/vnd.spdx+json"],
+      "predicateTypes": ["https://spdx.dev/Document"]
     },
     {
       "id": "sbom-cyclonedx",
       "label": "CycloneDX SBOM",
       "requiredGroup": "sbom",
       "evidenceFilename": "sbom.cyclonedx.json",
-      "artifactTypes": [
-        "application/vnd.cyclonedx+json",
-        "application/vnd.cyclonedx"
-      ],
-      "predicateTypes": [
-        "https://cyclonedx.org/bom",
-        "https://cyclonedx.org/specification"
-      ]
+      "artifactTypes": ["application/vnd.cyclonedx+json"],
+      "predicateTypes": ["https://cyclonedx.org/bom", "https://cyclonedx.org/specification"]
+    },
+    {
+      "id": "sbom-scout",
+      "label": "Docker Scout SBOM",
+      "requiredGroup": "sbom",
+      "evidenceFilename": "sbom.scout.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://scout.docker.com/sbom"]
     },
     {
       "id": "provenance-slsa",
       "label": "SLSA provenance",
       "requiredGroup": "provenance",
       "evidenceFilename": "provenance.slsa.json",
-      "artifactTypes": [
-        "application/vnd.slsa.provenance+json"
-      ],
-      "predicateTypes": [
-        "https://slsa.dev/provenance",
-        "https://slsa.dev/spec"
-      ]
+      "artifactTypes": ["application/vnd.slsa.provenance+json"],
+      "predicateTypes": ["https://slsa.dev/provenance"]
+    },
+    {
+      "id": "provenance-scout",
+      "label": "Docker Scout provenance",
+      "requiredGroup": "provenance",
+      "evidenceFilename": "provenance.scout.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://scout.docker.com/provenance"]
+    },
+    {
+      "id": "slsa-verification-summary",
+      "label": "SLSA verification summary (VSA)",
+      "requiredGroup": null,
+      "evidenceFilename": "slsa-verification-summary.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://slsa.dev/verification_summary"]
     },
     {
       "id": "vex-openvex",
       "label": "OpenVEX",
       "requiredGroup": "vex",
       "evidenceFilename": "vex.openvex.json",
-      "artifactTypes": [
-        "application/vnd.openvex+json",
-        "application/openvex+json"
-      ],
-      "predicateTypes": [
-        "https://openvex.dev/ns"
-      ]
+      "artifactTypes": ["application/vnd.openvex+json", "application/openvex+json"],
+      "predicateTypes": ["https://openvex.dev/ns"]
     },
     {
-      "id": "vuln-report",
-      "label": "Vulnerability report",
+      "id": "vuln-report-intoto",
+      "label": "in-toto vulnerability report",
       "requiredGroup": null,
-      "evidenceFilename": "vulnerability-report.json",
-      "artifactTypes": [
-        "application/vnd.docker.scout.vulnerability-report+json"
-      ],
-      "predicateTypes": [
-        "https://in-toto.io/attestation/vulns"
-      ]
+      "evidenceFilename": "vulnerability-report.intoto.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://in-toto.io/attestation/vulns"]
+    },
+    {
+      "id": "vuln-report-scout",
+      "label": "Docker Scout vulnerability report",
+      "requiredGroup": null,
+      "evidenceFilename": "vulnerability-report.scout.json",
+      "artifactTypes": ["application/vnd.docker.scout.vulnerability-report+json"],
+      "predicateTypes": ["https://scout.docker.com/vulnerabilities"]
+    },
+    {
+      "id": "scan-secrets",
+      "label": "Secret scan",
+      "requiredGroup": null,
+      "evidenceFilename": "scan-secrets.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://scout.docker.com/secrets"]
+    },
+    {
+      "id": "scan-virus",
+      "label": "Malware scan",
+      "requiredGroup": null,
+      "evidenceFilename": "scan-virus.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://scout.docker.com/virus"]
+    },
+    {
+      "id": "tests",
+      "label": "Image test results",
+      "requiredGroup": null,
+      "evidenceFilename": "tests.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://scout.docker.com/tests"]
+    },
+    {
+      "id": "dhi-fips",
+      "label": "DHI FIPS attestation",
+      "requiredGroup": null,
+      "evidenceFilename": "dhi-fips.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://docker.com/dhi/fips"]
+    },
+    {
+      "id": "dhi-stig",
+      "label": "DHI STIG hardening attestation",
+      "requiredGroup": null,
+      "evidenceFilename": "dhi-stig.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://docker.com/dhi/stig"]
+    },
+    {
+      "id": "dhi-source",
+      "label": "DHI source attestation",
+      "requiredGroup": null,
+      "evidenceFilename": "dhi-source.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://docker.com/dhi/source"]
+    },
+    {
+      "id": "dhi-changelog",
+      "label": "DHI changelog",
+      "requiredGroup": null,
+      "evidenceFilename": "dhi-changelog.json",
+      "artifactTypes": [],
+      "predicateTypes": ["https://docker.com/dhi/changelog"]
     },
     {
       "id": "signature-cosign",
@@ -94,7 +172,6 @@
       "evidenceFilename": null,
       "artifactTypes": [
         "application/vnd.dev.cosign.artifact.sig.v1+json",
-        "application/vnd.dev.sigstore.bundle+json;version=0.1",
         "application/vnd.dev.sigstore.bundle.v0.3+json"
       ],
       "predicateTypes": []

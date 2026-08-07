@@ -53,22 +53,35 @@ check "no missing groups"      "[]"                       "$(jq -c '.groupsMissi
 check "spdx via predicate"     "sbom-spdx"                "$(jq -r '.artifacts[0].class' <<<"$out")"
 check "slsa v0.2 prefix match" "provenance-slsa"          "$(jq -r '.artifacts[1].class' <<<"$out")"
 check "openvex versioned ns"   "vex-openvex"              "$(jq -r '.artifacts[2].class' <<<"$out")"
-check "vuln report classified" "vuln-report"              "$(jq -r '.artifacts[3].class' <<<"$out")"
+check "vuln report classified" "vuln-report-intoto"       "$(jq -r '.artifacts[3].class' <<<"$out")"
 # A generic Docker attestation manifest with no predicate annotation must fall
 # through to the generic class, NOT be counted toward a required group -- it
 # needs deep inspection (see 90-inspect-referrers.sh) before it means anything.
 check "bare attestation manifest" "attestation-manifest-generic" "$(jq -r '.artifacts[4].class' <<<"$out")"
 check "generic has no group"   "null"                     "$(jq -r '.artifacts[4].group' <<<"$out")"
 
-echo "== referrers-missing-vex.json (gate must fail)"
+# Absent VEX warns rather than fails. Verified against six real DHI tags: OpenVEX
+# ships on debian-based images and is absent from alpine-based ones. Failing on it
+# would block every Alpine DHI image for something the pipeline cannot fix.
+echo "== referrers-missing-vex.json (VEX absent: warn, do not fail)"
 out="$(run referrers-missing-vex.json)"
-check "vex reported missing"   '["vex"]'                  "$(jq -c '.groupsMissing' <<<"$out")"
-check "sbom+provenance ok"     '["provenance","sbom"]'    "$(jq -c '.groupsPresent' <<<"$out")"
+check "required groups satisfied"        "[]"                    "$(jq -c '.groupsMissing' <<<"$out")"
+check "vex reported as expected-missing" '["vex"]'               "$(jq -c '.groupsExpectedMissing' <<<"$out")"
+check "sbom+provenance present"          '["provenance","sbom"]' "$(jq -c '.groupsPresent' <<<"$out")"
+
+# ...unless policy says otherwise. That choice belongs to policy, not this table.
+echo "== REQUIRE_VEX=1 promotes vex to a hard requirement"
+out="$(REQUIRE_VEX=1 run referrers-missing-vex.json)"
+check "vex becomes required"   '["provenance","sbom","vex"]' "$(jq -c '.groupsRequired' <<<"$out")"
+check "vex now fails the gate" '["vex"]'                     "$(jq -c '.groupsMissing' <<<"$out")"
 
 echo "== referrers-empty.json (no attestations at all)"
 out="$(run referrers-empty.json)"
-check "total is zero"          "0"                        "$(jq -r '.total' <<<"$out")"
-check "all groups missing"     '["sbom","provenance","vex"]' "$(jq -c '.groupsMissing' <<<"$out")"
+check "total is zero"            "0"                      "$(jq -r '.total' <<<"$out")"
+# Sorted, not table order: groupsRequired is deduped with `unique`, which sorts.
+# Asserting the sorted form keeps this stable if the table is ever reordered.
+check "required groups missing"  '["provenance","sbom"]'  "$(jq -c '.groupsMissing' <<<"$out")"
+check "vex also expected-missing" '["vex"]'               "$(jq -c '.groupsExpectedMissing' <<<"$out")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

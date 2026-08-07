@@ -124,15 +124,28 @@ jq -r '.artifacts[] | "    " + (.class + (" " * (34 - (.class | length))))
 
 MISSING="$(jq -c '.groupsMissing' "$INVENTORY")"
 PRESENT="$(jq -c '.groupsPresent' "$INVENTORY")"
+EXPECTED_MISSING="$(jq -c '.groupsExpectedMissing' "$INVENTORY")"
+REQUIRED="$(jq -c '.groupsRequired' "$INVENTORY")"
 
 if [[ "$TOTAL" == "0" ]]; then
   add_check attestations-present fail "required attestations present" \
     "ZERO referrers found at $TARGET. Either the copy dropped them (check 10-sync.sh's --referrers-src) or the source never had any. Diagnose: REPO=$REPO TAG=$TAG ./scripts/90-inspect-referrers.sh"
 elif [[ "$MISSING" == "[]" ]]; then
-  add_check attestations-present pass "required attestations present: $PRESENT" ""
+  add_check attestations-present pass "required attestations present: $PRESENT (required: $REQUIRED)" ""
 else
   add_check attestations-present fail "required attestations MISSING: $MISSING" \
-    "found groups $PRESENT across $TOTAL referrer(s); required: $(jq -c '.requiredGroups' "$ATTESTATION_TYPES")"
+    "found groups $PRESENT across $TOTAL referrer(s); required: $REQUIRED"
+fi
+
+# Expected-but-absent groups warn instead of failing. OpenVEX ships on
+# debian-based DHI tags and not on alpine ones -- a property of the upstream
+# image, not of this copy, so failing here would block an image for something the
+# pipeline neither caused nor can fix. REQUIRE_VEX=1 makes it a hard requirement.
+if [[ "$EXPECTED_MISSING" != "[]" ]]; then
+  add_check expected-attestations warn "expected but absent: $EXPECTED_MISSING" \
+    "not present on this tag. If policy requires it, re-run with REQUIRE_VEX=1 to fail instead of warn. Note the scan gate will run unsuppressed without VEX."
+else
+  add_check expected-attestations pass "all expected attestation groups present" ""
 fi
 
 # Unclassified referrers do not fail the gate -- an unrecognised extra attestation
