@@ -187,8 +187,7 @@ runs:
         # reported unmatched rather than guessed at.
         # -------------------------------------------------------------------
         VEX_ARGS_FILES=()
-        VEX_MAPPINGS='[]'
-        VEX_UNMATCHED='[]'
+        VEX_NORM_FILES=()
 
         if (( ! SKIP_VEX )) && (( VEX_COUNT > 0 )); then
           step "30b2 normalise VEX to scanner package identifiers"
@@ -212,9 +211,7 @@ runs:
               if jq -f "$VEX_NORMALIZE_JQ" \
                    --argjson packages "$(cat "$PKG_INVENTORY")" "$f" >"$full" 2>/dev/null; then
                 jq '.vex' "$full" >"$norm"
-                m="$(jq -c '.mappings' "$full")"; u="$(jq -c '.unmatched' "$full")"
-                VEX_MAPPINGS="$(jq -c --argjson a "$VEX_MAPPINGS" --argjson b "$m" '$a + $b' <<<'null')"
-                VEX_UNMATCHED="$(jq -c --argjson a "$VEX_UNMATCHED" --argjson b "$u" '$a + $b' <<<'null')"
+                VEX_NORM_FILES+=("$full")
                 log "  ${f##*/}: $(jq -r '.mappings|length' "$full") statement(s) remapped, $(jq -r '.unmatched|length' "$full") unmatched"
                 jq -r '.mappings[] | "      " + .vulnerability + ": " + (.from|join(",")) + " -> " + (.to|join(", "))' "$full" >&2
                 if [[ "$(jq -r '.unmatched|length' "$full")" != "0" ]]; then
@@ -228,6 +225,22 @@ runs:
               fi
             done
           fi
+        fi
+
+        # Aggregate the normalisation record ON DISK, never on a command line.
+        # Python's DHI VEX carries 700+ statements and its mappings JSON alone
+        # is ~130KB -- right at Linux's ~128KiB PER-ARGUMENT ceiling
+        # (MAX_ARG_STRLEN). Passing it via --argjson made exec fail with
+        # "Argument list too long", which bash surfaces as a bare exit 126:
+        # observed in production on dhi-python while dhi-node's 14 statements
+        # sailed through. Everywhere below, large JSON moves between jq calls
+        # as files (--slurpfile / positional inputs), never as argv.
+        NORM_AGG="$RUN_DIR/vex-normalization.json"
+        if (( ${#VEX_NORM_FILES[@]} )); then
+          jq -s '{mappings: (map(.mappings) | add), unmatched: (map(.unmatched) | add)}' \
+            "${VEX_NORM_FILES[@]}" >"$NORM_AGG"
+        else
+          printf '{"mappings":[],"unmatched":[]}' >"$NORM_AGG"
         fi
 
         # Pass 2 -- the GATE, with the vendor's VEX applied (unless skip-vex).
@@ -264,10 +277,14 @@ runs:
                 | select((.Severity // "" | ascii_upcase) | IN($sevs[])) ]' "$1"
         }
 
-        BASELINE="$(extract_findings "$TRIVY_BASELINE_JSON")"
-        GATING="$(extract_findings "$TRIVY_JSON")"
-        BASELINE_COUNT="$(jq '[ .[] | .VulnerabilityID ] | unique | length' <<<"$BASELINE")"
-        GATING_COUNT="$(jq 'length' <<<"$GATING")"
+        # Findings live in files: full Trivy vulnerability objects run to
+        # several KB each, so a busy baseline blows the argv ceiling too.
+        BASELINE_FINDINGS="$RUN_DIR/baseline-findings.json"
+        GATING_FINDINGS="$RUN_DIR/gating-findings.json"
+        extract_findings "$TRIVY_BASELINE_JSON" >"$BASELINE_FINDINGS"
+        extract_findings "$TRIVY_JSON" >"$GATING_FINDINGS"
+        BASELINE_COUNT="$(jq '[ .[] | .VulnerabilityID ] | unique | length' "$BASELINE_FINDINGS")"
+        GATING_COUNT="$(jq 'length' "$GATING_FINDINGS")"
 
         # Suppressed = baseline minus gating, computed by set difference.
         #
@@ -279,24 +296,27 @@ runs:
         #
         # Each suppression is annotated with the justification from the VEX document, so
         # the report says WHY a CVE was set aside rather than just that it was.
-        VEX_INDEX='{}'
+        VEX_INDEX_FILE="$RUN_DIR/vex-index.json"
+        printf '{}' >"$VEX_INDEX_FILE"
         for f in "${VEX_FILES[@]:-}"; do
           [[ -n "$f" && -f "$f" ]] || continue
-          VEX_INDEX="$(jq -c --slurpfile v "$f" '
+          _tmp="$(mktemp)"
+          jq -c --slurpfile v "$f" '
             . + ( ($v[0].statements // [])
                   | map({ key: (.vulnerability.name // .vulnerability // "?" | tostring),
                           value: { status, justification, impact_statement } })
-                  | from_entries )' <<<"$VEX_INDEX")"
+                  | from_entries )' "$VEX_INDEX_FILE" >"$_tmp" && mv "$_tmp" "$VEX_INDEX_FILE"
         done
 
-        SUPPRESSED="$(jq -c --argjson gating "$GATING" --argjson vex "$VEX_INDEX" '
-          ([ $gating[] | .VulnerabilityID ] | unique) as $survived
+        SUPPRESSED_FILE="$RUN_DIR/suppressed.json"
+        jq -c --slurpfile gating "$GATING_FINDINGS" --slurpfile vex "$VEX_INDEX_FILE" '
+          ([ $gating[0][] | .VulnerabilityID ] | unique) as $survived
           | [ .[] | select([.VulnerabilityID] | inside($survived) | not) ]
           | group_by(.VulnerabilityID) | map(.[0])
           | map({ id: .VulnerabilityID, severity: .Severity, pkg: .PkgName,
                   installed: .InstalledVersion,
-                  vex: ($vex[.VulnerabilityID] // null) })' <<<"$BASELINE")"
-        SUPPRESSED_COUNT="$(jq 'length' <<<"$SUPPRESSED")"
+                  vex: ($vex[0][.VulnerabilityID] // null) })' "$BASELINE_FINDINGS" >"$SUPPRESSED_FILE"
+        SUPPRESSED_COUNT="$(jq 'length' "$SUPPRESSED_FILE")"
 
         log "findings without VEX (baseline)   : $BASELINE_COUNT"
         log "suppressed by vendor VEX            : $SUPPRESSED_COUNT"
@@ -313,7 +333,7 @@ runs:
           else
             warn "VEX documents were supplied but suppressed NOTHING while $BASELINE_COUNT finding(s) remain."
             warn "  That usually means the statements did not match the scanner's package identifiers."
-            warn "  Mapped statements: $(jq -r 'length' <<<"$VEX_MAPPINGS"), unmatched: $(jq -r 'length' <<<"$VEX_UNMATCHED")"
+            warn "  Mapped statements: $(jq -r '.mappings | length' "$NORM_AGG"), unmatched: $(jq -r '.unmatched | length' "$NORM_AGG")"
             warn "  Inspect: $RUN_DIR/vex-normalize-*.json"
           fi
         fi
@@ -321,7 +341,7 @@ runs:
         if (( SUPPRESSED_COUNT > 0 )); then
           jq -r '.[] | "    SUPPRESSED  " + .severity + "  " + .id + "  " + (.pkg // "?")
                  + (if .vex then "\n                justification: " + (.vex.justification // "none given") else "" end)' \
-            <<<"$SUPPRESSED" >&2
+            "$SUPPRESSED_FILE" >&2
         fi
 
         if (( GATING_COUNT > 0 )); then
@@ -329,7 +349,7 @@ runs:
                  | "    " + .Severity + "  " + .VulnerabilityID + "  " + (.PkgName // "?")
                    + " " + (.InstalledVersion // "?")
                    + (if .FixedVersion then " -> fixed in " + .FixedVersion else " (no fix available)" end)' \
-            <<<"$GATING" >&2
+            "$GATING_FINDINGS" >&2
         fi
 
         # -------------------------------------------------------------------
@@ -371,6 +391,13 @@ runs:
         GATE_STATUS="pass"
         (( GATING_COUNT > 0 )) && GATE_STATUS="fail"
 
+        # Condensed gating findings, again on disk.
+        GATING_CONDENSED="$RUN_DIR/gating-condensed.json"
+        jq '[ group_by(.VulnerabilityID)[] | .[0]
+              | {id: .VulnerabilityID, severity: .Severity, pkg: .PkgName,
+                 installed: .InstalledVersion, fixed: .FixedVersion,
+                 title: (.Title // null)} ]' "$GATING_FINDINGS" >"$GATING_CONDENSED"
+
         jq -n \
           --arg gate "scan" \
           --arg status "$GATE_STATUS" \
@@ -384,14 +411,10 @@ runs:
           --argjson gatingCount "$GATING_COUNT" \
           --argjson baselineCount "$BASELINE_COUNT" \
           --argjson suppressedByVex "$SUPPRESSED_COUNT" \
-          --argjson suppressedDetail "$SUPPRESSED" \
-          --argjson vexMappings "$VEX_MAPPINGS" \
-          --argjson vexUnmatched "$VEX_UNMATCHED" \
+          --slurpfile suppressedDetail "$SUPPRESSED_FILE" \
+          --slurpfile norm "$NORM_AGG" \
+          --slurpfile findings "$GATING_CONDENSED" \
           --arg compareStatus "$COMPARE_STATUS" \
-          --argjson findings "$(jq '[ group_by(.VulnerabilityID)[] | .[0]
-                                      | {id: .VulnerabilityID, severity: .Severity, pkg: .PkgName,
-                                         installed: .InstalledVersion, fixed: .FixedVersion,
-                                         title: (.Title // null)} ]' <<<"$GATING")" \
           '{
              gate: $gate, status: $status, at: $at,
              target: { ref: $ref, digest: $digest, platform: $platform },
@@ -399,24 +422,30 @@ runs:
                        gateFailsOn: "un-VEXed HIGH/CRITICAL from Trivy" },
              vex: { documents: $vexDocuments,
                     suppressedCount: $suppressedByVex,
-                    suppressed: $suppressedDetail,
+                    suppressed: $suppressedDetail[0],
                     normalization: {
-                      remapped: $vexMappings,
-                      unmatched: $vexUnmatched,
+                      remapped: $norm[0].mappings,
+                      unmatched: $norm[0].unmatched,
                       why: "DHI VEX names Debian SOURCE packages (pkg:deb/debian/glibc@...) while Trivy and Grype match the BINARY package they found (pkg:deb/debian/libc6@...). Without remapping, neither scanner applies the statements: measured 12 -> 12 Trivy findings and 6 -> 6 Grype findings on dhi-node:26-debian13. Statuses and justifications are copied verbatim; only product identifiers are added; version mismatches are reported unmatched rather than guessed."
                     },
                     note: "suppressedCount is computed as (baseline findings - findings surviving VEX), not read from Trivy .ModifiedFindings, which is not populated for file-based VEX" },
              trivy: { baselineFindings: $baselineCount,
                       gatingFindings: $gatingCount,
-                      findings: $findings,
+                      findings: $findings[0],
                       note: "baselineFindings is what a scanner reports with no VEX applied; gatingFindings is what remains after vendor VEX and is what blocks promotion" },
              scoutCompare: { status: $compareStatus }
            }' >"$REPORT"
 
         log "wrote ${REPORT#"$REPO_ROOT"/}"
 
+        # Counts only in the manifest verdict: the full suppression and
+        # normalization detail lives in scan-report.json (and the evidence
+        # bundle), and a 700-statement VEX would push the detail JSON past the
+        # argv ceiling on its way through gate_end.
         gate_end scan "$GATE_STATUS" \
-          "$(jq -c '{vex, trivy: {baselineFindings: .trivy.baselineFindings, gatingFindings: .trivy.gatingFindings}, policy}' "$REPORT")"
+          "$(jq -c '{vex: {documents: .vex.documents, suppressedCount: .vex.suppressedCount},
+                     trivy: {baselineFindings: .trivy.baselineFindings, gatingFindings: .trivy.gatingFindings},
+                     policy}' "$REPORT")"
 
         if [[ "$GATE_STATUS" == "pass" ]]; then
           summary "### ✅ Scan gate passed"
