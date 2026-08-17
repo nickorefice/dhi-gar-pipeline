@@ -5,15 +5,15 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-08-17T21:05:44Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/32069260820)
+Updated: 2026-08-17T21:12:57Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/32069343995)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
 | dhi-node | 26-debian13 | ✅ current | `sha256:57be2fe48c8ef10ea7b24a521f869b6456c2a92caa64285f94fe70b40eaaa199` | `sha256:57be2fe48c8ef10ea7b24a521f869b6456c2a92caa64285f94fe70b40eaaa199` | `sha256:57be2fe48c8e` | true | — |
 | dhi-node | 24-debian13 | ✅ current | `sha256:bf96f6c2ac657a3378b36917d7afbd8f8ad49ffe41af8d115c98ea5d124aecec` | `sha256:bf96f6c2ac657a3378b36917d7afbd8f8ad49ffe41af8d115c98ea5d124aecec` | `sha256:bf96f6c2ac65` | true | — |
-| dhi-python | 3-debian | ▫️ missing | `sha256:ca15493305d675cccc8f3ea8ee5cdff5f4904ae8f90ab9fd26a0a5cbe5ad984a` | `—` | `—` | true | — |
-| dhi-nvflare | 2-debian13 | ▫️ missing | `sha256:d87f9b4adc748f031632fcca1d15977233459c1b189837408c691ebaddfab227` | `—` | `—` | true | — |
-| dhi-regctl | 0-debian13 | ▫️ missing | `sha256:6a76c32d13ae9bb93e767d2d69609a3ead1f9ca43d79dcd797a2930071483837` | `—` | `—` | false | — |
+| dhi-python | 3-debian | ⛔ blocked | `sha256:ca15493305d675cccc8f3ea8ee5cdff5f4904ae8f90ab9fd26a0a5cbe5ad984a` | `—` | `sha256:ca15493305d6` | true | — |
+| dhi-nvflare | 2-debian13 | ✅ current | `sha256:d87f9b4adc748f031632fcca1d15977233459c1b189837408c691ebaddfab227` | `sha256:d87f9b4adc748f031632fcca1d15977233459c1b189837408c691ebaddfab227` | `sha256:d87f9b4adc74` | true | — |
+| dhi-regctl | 0-debian13 | ✅ current | `sha256:6a76c32d13ae9bb93e767d2d69609a3ead1f9ca43d79dcd797a2930071483837` | `sha256:6a76c32d13ae9bb93e767d2d69609a3ead1f9ca43d79dcd797a2930071483837` | `sha256:6a76c32d13ae` | false | — |
 
 **States:** `current` prod serves the latest upstream digest · `stale` behind
 upstream, the next poll acts · `blocked` synced but a gate refused promotion ·
