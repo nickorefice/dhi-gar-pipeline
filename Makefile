@@ -29,11 +29,11 @@ help: ## Show this help
 	@printf 'DHI -> GAR mirroring pipeline\n\n'
 	@printf 'Pipeline (runs in GitHub Actions; override with REPO=<repo> TAG=<tag>):\n'
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | grep -E '^(run|poll|demo-fail|inspect|watch):' \
+	  | grep -E '^(run|poll|demo-fail|inspect|status|watch):' \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@printf '\nSetup / infrastructure:\n'
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | grep -vE '^(run|poll|demo-fail|inspect|watch):' \
+	  | grep -vE '^(run|poll|demo-fail|inspect|status|watch):' \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@printf '\nCurrent: REPO=%s TAG=%s PROJECT=%s\n' "$(REPO)" "$(TAG)" "$(or $(GCP_PROJECT_ID),<unset>)"
 
@@ -81,6 +81,8 @@ test: ## Run offline tests (they source the library extracted from the action YA
 	@echo
 	@./tests/test-vex-normalize.sh
 	@echo
+	@./tests/test-expand-config.sh
+	@echo
 	@./tests/test-relay.sh
 
 .PHONY: lint
@@ -112,6 +114,11 @@ demo-fail: ## Negative test: run the scan gate with VEX suppressed so promotion 
 .PHONY: inspect
 inspect: ## Diagnostic: where does DHI actually keep attestations, and of what type
 	@gh workflow run inspect-referrers.yaml -f repo=$(REPO) -f tag=$(TAG)
+	@echo "started -- follow with: make watch"
+
+.PHONY: status
+status: ## Regenerate STATUS.md (the tracking dashboard) in CI and commit it
+	@gh workflow run status.yaml -f commit=true
 	@echo "started -- follow with: make watch"
 
 .PHONY: watch

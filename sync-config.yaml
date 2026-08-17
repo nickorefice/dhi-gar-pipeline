@@ -1,0 +1,72 @@
+# sync-config.yaml -- THE ALLOW LIST. Admin-edited; the only file that decides
+# what is auto-ingested. Everything not listed here is denied: the scheduled
+# poll only checks these entries, and webhook dispatches are re-checked against
+# this file. Adding a tag is a one-line, reviewable change; a quiet poll tick
+# costs seconds.
+#
+# Shape: images -> tags. A tag entry is either a plain string or a mapping
+# with per-tag overrides:
+#
+#   images:
+#     - repo: dhi-example
+#       requireVex: true          # image-level default, tags may override
+#       hold: false               # image-level default, tags may override
+#       tags:
+#         - 3-debian              # plain string: inherits the image defaults
+#         - tag: 3.13-debian      # mapping: per-tag settings
+#           requireVex: false
+#           hold: true
+#           note: free text, carried into logs and STATUS.md
+#
+#   requireVex  fails the verify gate when OpenVEX is absent. Set it where
+#               policy demands VEX and the base image provides it.
+#   hold        THE QUARANTINE LIST: the tag keeps syncing into dhi-quarantine
+#               and both gates run, but promotion to dhi-prod is REFUSED (in
+#               the promote gate itself, not just skipped in the workflow).
+#               Use it to stage a tag for testing before serving it to users.
+#
+# Tag choice is not cosmetic. Observed on nicksdemoorg mirrors:
+#   - debian-based tags usually ship OpenVEX; alpine-based ones do not. Without
+#     VEX the scan gate runs unsuppressed, so a hardened image can report CVEs
+#     its vendor has already assessed as not affecting it.
+#   - -dev tags include a shell and package manager. They exist for build
+#     stages and are deliberately NOT synced to a registry that feeds
+#     production.
+#   - -fips and -sfw-ent carry extra attestations (dhi/fips, dhi/stig).
+#
+# dhi-node:24-alpine is deliberately NOT listed. It is the manual
+# negative-test tag (make run REPO=dhi-node TAG=24-alpine REQUIRE_VEX=1): with
+# requireVex false the poll would quietly promote it out of quarantine and
+# flatten the demo's gate-blocked example; with true it would fail every tick.
+# Auto-syncing a tag that exists to demonstrate failure is a category error.
+
+images:
+  - repo: dhi-node
+    requireVex: true
+    tags:
+      - tag: 26-debian13
+        note: current Node 26 on Debian 13; ships OpenVEX
+      - tag: 24-debian13
+        note: Node 24 LTS on Debian 13; ships OpenVEX
+
+  - repo: dhi-python
+    requireVex: true
+    tags:
+      - tag: 3-debian
+        note: Python 3 on Debian; OpenVEX confirmed present (15 referrers)
+
+  - repo: dhi-nvflare
+    requireVex: true
+    tags:
+      - tag: 2-debian13
+        note: NVIDIA FLARE 2 on Debian 13; OpenVEX confirmed present (15 referrers)
+
+  - repo: dhi-regctl
+    requireVex: false
+    tags:
+      - tag: 0-debian13
+        note: >-
+          regctl on Debian 13, for GAR consumers. requireVex is false because
+          this tag measurably ships NO OpenVEX (14 referrers, none VEX) --
+          requiring it would fail the verify gate on every poll. The scan gate
+          still runs, unsuppressed.

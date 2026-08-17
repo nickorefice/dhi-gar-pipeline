@@ -55,7 +55,7 @@ nothing to verify, so the URL is the only credential, and Cloud Run must allow
 unauthenticated invocations because Docker Hub cannot present a GCP identity. The
 relay therefore constrains what a leaked URL can achieve: an allow-listed
 repository, an allow-listed tag, dedupe on `repo:tag:pushed_at`, and the workflow
-re-checking the request against `sync-config.json`. Worst case, someone with the URL
+re-checking the request against `sync-config.yaml`. Worst case, someone with the URL
 re-triggers a sync of a tag you already sync, at a digest the gates still must pass.
 
 **[observed] The tag filter is load-bearing, not a nicety.** DHI mirrors **all**
@@ -71,7 +71,7 @@ creation is a UI step (or needs a personal token with admin on the repo). Plan f
 it as a manual step in the runbook.
 
 **Keep the cron.** Docker Hub does not guarantee delivery, relays get redeployed,
-and deliveries get dropped. A daily sweep over `sync-config.json` catches what the
+and deliveries get dropped. A daily sweep over `sync-config.yaml` catches what the
 event stream missed. `regsync check` suits the same role declaratively.
 
 One thing to verify in your own org before retiring the cron: that a **mirror sync**
@@ -219,7 +219,7 @@ Consequences:
 - Requiring VEX unconditionally fails every Alpine DHI image, for a property of
   the upstream image the pipeline cannot fix. VEX is therefore an *expected*
   group (warn) by default, promoted to required per-tag via `requireVex` in
-  `sync-config.json` or `REQUIRE_VEX=1`.
+  `sync-config.yaml` or `REQUIRE_VEX=1`.
 - Without VEX the scan runs unsuppressed, so an Alpine DHI image may report CVEs
   its vendor has already assessed as not affecting it.
 

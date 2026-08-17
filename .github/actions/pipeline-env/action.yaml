@@ -2,9 +2,10 @@ name: Pipeline environment
 description: >-
   Materialise the shared pipeline library at $RUNNER_TEMP/dhi-pipeline-lib.sh.
   THIS FILE IS THE SINGLE SOURCE OF TRUTH for the plumbing every stage shares:
-  config loading, logging, registry auth, reference builders, the run manifest,
-  the gate lifecycle, referrer classification, and the three multi-caller stage
-  bodies (run_verify, check_current, promote_gate_check). Every stage action
+  config loading (sync-config.yaml via load_sync_config), logging, registry
+  auth, reference builders, the run manifest, the gate lifecycle, referrer
+  classification, and the multi-caller stage bodies (run_verify,
+  check_current, promote_gate_check, report_status). Every stage action
   sources the generated file; the offline tests extract and source the same
   text (tests/extract-pipeline-lib.sh), so what is tested is what runs.
 runs:
@@ -38,8 +39,9 @@ runs:
         REPO_ROOT="${DHI_REPO_ROOT:-$PWD}"
         CLASSIFY_JQ="$REPO_ROOT/scripts/lib/classify.jq"
         VEX_NORMALIZE_JQ="$REPO_ROOT/scripts/lib/vex-normalize.jq"
+        EXPAND_CONFIG_JQ="$REPO_ROOT/scripts/lib/expand-config.jq"
         ATTESTATION_TYPES="$REPO_ROOT/attestation-types.json"
-        export REPO_ROOT CLASSIFY_JQ VEX_NORMALIZE_JQ ATTESTATION_TYPES
+        export REPO_ROOT CLASSIFY_JQ VEX_NORMALIZE_JQ EXPAND_CONFIG_JQ ATTESTATION_TYPES
 
         # --------------------------------------------------------------------------
         # Logging
@@ -481,6 +483,29 @@ runs:
           printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"
         }
 
+        # --------------------------------------------------------------------------
+        # Allow-list config (sync-config.yaml)
+        # --------------------------------------------------------------------------
+        # YAML -> JSON via python3 + PyYAML, the one converter this repo already
+        # depends on (tests/lint-actions.sh; GitHub runners ship it). Deliberately
+        # not yq: two incompatible tools share that name, and which one is on a
+        # given machine is silent.
+        _yaml_to_json() {
+          python3 -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), sys.stdout)' "$1" \
+            || die "could not parse $1 as YAML (python3 + PyYAML required)"
+        }
+
+        # Print the expanded allow list: [{repo, tag, requireVex, hold, note}].
+        # Expansion + validation live in scripts/lib/expand-config.jq and fail
+        # loudly -- a config typo must stop the poll, not silently shrink the
+        # allow list. SYNC_CONFIG overrides the path (tests use a fixture).
+        load_sync_config() {
+          local cfg="${SYNC_CONFIG:-$REPO_ROOT/sync-config.yaml}"
+          [[ -f "$cfg" ]] || die "no sync config at $cfg"
+          _yaml_to_json "$cfg" | jq -f "$EXPAND_CONFIG_JQ" \
+            || die "sync config at $cfg failed validation -- see the error above"
+        }
+
         # ==========================================================================
         # Stage bodies with more than one caller.
         #
@@ -749,17 +774,21 @@ runs:
           step "20 verify: PASS${WARNED:+ ($WARNED warning(s))}"
         }
 
-        # Which sync-config.json entries actually need a pipeline run?
+        # Which sync-config.yaml entries actually need a pipeline run?
         #
         # The scheduled trigger polls; running the full pipeline every tick would burn
         # ~10 minutes of runner time per tag for work that almost always concludes
         # "nothing changed". This check is the short-circuit: two HEAD requests per tag
-        # (upstream digest, prod digest), a comparison, and a filtered list out. A
+        # (upstream digest, target digest), a comparison, and a filtered list out. A
         # quiet tick costs seconds, not minutes.
         #
         # A tag needs a sync when:
-        #   not-in-prod     the tag has never been promoted
-        #   upstream-moved  the upstream digest differs from what prod holds
+        #   not-in-prod / not-in-quarantine  never landed in its target repo
+        #   upstream-moved                   the upstream digest differs from the target
+        #
+        # A HELD tag never reaches prod BY DESIGN, so measuring it against prod
+        # would re-sync it every tick forever. Its "current" target is quarantine
+        # -- the repo it is allowed to occupy.
         #
         # Prints a JSON array of stale entries on STDOUT (logs go to stderr). Returns:
         #   0  check completed; stdout is authoritative
@@ -772,8 +801,8 @@ runs:
           need_tool regctl jq
           require_vars GCP_PROJECT_ID
 
-          CONFIG="${SYNC_CONFIG:-$REPO_ROOT/sync-config.json}"
-          [[ -f "$CONFIG" ]] || die "no sync config at $CONFIG"
+          local entries
+          entries="$(load_sync_config)"
 
           if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
             login_dockerhub
@@ -782,13 +811,13 @@ runs:
             log "auth: SKIP_LOGIN=1, reusing existing credentials"
           fi
 
-          TOTAL="$(jq -r '.tags | length' "$CONFIG")"
-          step "checking $TOTAL configured tag(s) against prod"
+          TOTAL="$(jq -r 'length' <<<"$entries")"
+          step "checking $TOTAL configured tag(s)"
 
           RESULTS='[]'
           ERRORS=0
 
-          while IFS=$'\t' read -r repo tag require_vex; do
+          while IFS=$'\t' read -r repo tag require_vex hold; do
             [[ -n "$repo" ]] || continue
             # The ref builders read these globals.
             REPO="$repo"
@@ -802,24 +831,34 @@ runs:
               continue
             fi
 
-            prod="$(regctl manifest head "$(gar_ref prod)" --require-digest 2>/dev/null || true)"
-            if [[ -z "$prod" ]]; then
-              reason="not-in-prod"
-            elif [[ "$prod" != "$src" ]]; then
+            if [[ "$hold" == "true" ]]; then
+              target_name="quarantine"
+              have="$(regctl manifest head "$(gar_ref quarantine)" --require-digest 2>/dev/null || true)"
+            else
+              target_name="prod"
+              have="$(regctl manifest head "$(gar_ref prod)" --require-digest 2>/dev/null || true)"
+            fi
+
+            if [[ -z "$have" ]]; then
+              reason="not-in-$target_name"
+            elif [[ "$have" != "$src" ]]; then
               reason="upstream-moved"
             else
-              log "$repo:$tag  current ($src)"
+              log "$repo:$tag  current in $target_name ($src)"
               continue
             fi
 
-            log "$repo:$tag  NEEDS SYNC  reason=$reason upstream=$src prod=${prod:-none}"
+            held_note=""
+            [[ "$hold" == "true" ]] && held_note="  [held: will sync, will not promote]"
+            log "$repo:$tag  NEEDS SYNC  reason=$reason upstream=$src $target_name=${have:-none}$held_note"
             RESULTS="$(jq -c \
-              --arg r "$repo" --arg t "$tag" --argjson rv "$require_vex" \
-              --arg reason "$reason" --arg src "$src" --arg prod "${prod:-}" \
-              '. + [{repo: $r, tag: $t, requireVex: $rv, reason: $reason,
-                     srcDigest: $src, prodDigest: (if $prod == "" then null else $prod end)}]' \
+              --arg r "$repo" --arg t "$tag" --argjson rv "$require_vex" --argjson h "$hold" \
+              --arg reason "$reason" --arg src "$src" --arg have "${have:-}" --arg tn "$target_name" \
+              '. + [{repo: $r, tag: $t, requireVex: $rv, hold: $h, reason: $reason,
+                     srcDigest: $src, target: $tn,
+                     targetDigest: (if $have == "" then null else $have end)}]' \
               <<<"$RESULTS")"
-          done < <(jq -r '.tags[] | [.repo, .tag, (.requireVex // false)] | @tsv' "$CONFIG")
+          done < <(jq -r '.[] | [.repo, .tag, .requireVex, .hold] | @tsv' <<<"$entries")
 
           STALE="$(jq -r 'length' <<<"$RESULTS")"
           SUFFIX=""
@@ -839,6 +878,32 @@ runs:
         # GATES_OK=0/1; dies on refusal unless FORCE_PROMOTE=1 AND ALLOW_UNSAFE=1, in
         # which case the bypass is stamped on the record via GATES_OK=0.
         promote_gate_check() {
+          # THE HOLD LIST: an entry held in sync-config.yaml is refused HERE, in
+          # the gate check itself, so a re-run of the promote step alone (or a
+          # hand invocation) cannot promote a held tag. The workflow also skips
+          # the promote step for held matrix entries; this is the backstop that
+          # makes the hold a boundary rather than a convention. If the config
+          # file exists but fails to parse, load_sync_config dies -- fail
+          # closed. A missing file means "unlisted tag, demo mode": not held.
+          _cfg="${SYNC_CONFIG:-$REPO_ROOT/sync-config.yaml}"
+          HELD=false
+          if [[ -f "$_cfg" ]]; then
+            HELD="$(load_sync_config | jq -r --arg r "$REPO" --arg t "$TAG" \
+                      '[.[] | select(.repo == $r and .tag == $t)] | (.[0].hold // false)')"
+          fi
+          if [[ "$HELD" == "true" ]]; then
+            if [[ "${FORCE_PROMOTE:-0}" == "1" && "${ALLOW_UNSAFE:-0}" == "1" ]]; then
+              warn "FORCE_PROMOTE with ALLOW_UNSAFE: promoting despite the hold in sync-config.yaml"
+              warn "this is recorded in the run manifest and the evidence bundle"
+            else
+              bad "tag is HELD in sync-config.yaml -- refusing to promote"
+              summary "### ❌ Promotion blocked: held by policy"
+              summary ""
+              summary "\`$REPO:$TAG\` is on the hold list in sync-config.yaml. The gates may well be green; promotion is withheld until an admin removes the hold."
+              die "held by policy in sync-config.yaml -- image stays in quarantine (override: FORCE_PROMOTE=1 ALLOW_UNSAFE=1)"
+            fi
+          fi
+
           VERIFY_STATUS="$(jq -r '.gates.verify.status // "not-run"' "$RUN_MANIFEST")"
           SCAN_STATUS="$(jq -r '.gates.scan.status // "not-run"' "$RUN_MANIFEST")"
           VERIFY_DIGEST="$(jq -r '.gates.verify.digest // ""' "$RUN_MANIFEST")"
@@ -885,6 +950,82 @@ runs:
           else
             ok "both gates passed"
           fi
+        }
+
+        # The tracking view behind STATUS.md: for every allow-list entry, three
+        # HEAD requests (upstream, quarantine, prod) and a classification.
+        #
+        # States:
+        #   current       prod == upstream                        serving the latest
+        #   blocked       quarantine == upstream, prod does not   a gate (or hold-then-unhold) said no
+        #   stale         something is there but behind upstream  the next poll will act
+        #   missing       synced nowhere yet
+        #   held-current  hold entries: quarantine == upstream
+        #   held-stale    hold entries: quarantine behind/absent
+        #   upstream-unresolved  the Hub digest could not be read
+        #
+        # Prints a JSON array on stdout; logs a table to stderr. Like
+        # check_current it returns 3 when any upstream digest is unresolvable --
+        # a dead credential must not render as a healthy dashboard.
+        report_status() {
+          need_tool regctl jq
+          require_vars GCP_PROJECT_ID
+
+          local entries
+          entries="$(load_sync_config)"
+
+          if [[ "${SKIP_LOGIN:-0}" != "1" ]]; then
+            login_dockerhub
+            login_gar
+          else
+            log "auth: SKIP_LOGIN=1, reusing existing credentials"
+          fi
+
+          step "status: $(jq -r 'length' <<<"$entries") configured tag(s)"
+          RESULTS='[]'
+          ERRORS=0
+
+          while IFS=$'\t' read -r repo tag require_vex hold note; do
+            [[ -n "$repo" ]] || continue
+            REPO="$repo"
+            TAG="$tag"
+
+            src="$(regctl manifest head "$(hub_ref)" --require-digest 2>/dev/null || true)"
+            q="$(regctl manifest head "$(gar_ref quarantine)" --require-digest 2>/dev/null || true)"
+            p="$(regctl manifest head "$(gar_ref prod)" --require-digest 2>/dev/null || true)"
+
+            if [[ -z "$src" ]]; then
+              state="upstream-unresolved"
+              ERRORS=$((ERRORS + 1))
+              warn "$repo:$tag  could not resolve the upstream digest"
+            elif [[ "$hold" == "true" ]]; then
+              if [[ "$q" == "$src" ]]; then state="held-current"; else state="held-stale"; fi
+            elif [[ -n "$q" && "$q" == "$src" && "$p" != "$src" ]]; then
+              state="blocked"
+            elif [[ "$p" == "$src" ]]; then
+              state="current"
+            elif [[ -n "$p" || -n "$q" ]]; then
+              state="stale"
+            else
+              state="missing"
+            fi
+
+            log "$(printf '%-40s %s' "$repo:$tag" "$state")"
+            RESULTS="$(jq -c \
+              --arg r "$repo" --arg t "$tag" --arg state "$state" \
+              --arg src "${src:-}" --arg q "${q:-}" --arg p "${p:-}" \
+              --argjson rv "$require_vex" --argjson h "$hold" --arg note "$note" \
+              '. + [{repo: $r, tag: $t, state: $state,
+                     upstreamDigest: (if $src == "" then null else $src end),
+                     quarantineDigest: (if $q == "" then null else $q end),
+                     prodDigest: (if $p == "" then null else $p end),
+                     requireVex: $rv, hold: $h,
+                     note: (if $note == "" then null else $note end)}]' \
+              <<<"$RESULTS")"
+          done < <(jq -r '.[] | [.repo, .tag, .requireVex, .hold, (.note // "")] | @tsv' <<<"$entries")
+
+          printf '%s\n' "$RESULTS"
+          (( ERRORS == 0 )) || return 3
         }
 
         # --------------------------------------------------------------------------

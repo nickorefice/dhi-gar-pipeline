@@ -101,6 +101,36 @@ second opinion was removed with it.)
 | 50 | `.github/actions/export-evidence` | Write evidence bundle to GCS |
 | — | `.github/actions/inspect-referrers` | Diagnostic: where are the attestations, really? (`inspect-referrers.yaml` workflow) |
 
+## What gets mirrored: the allow list
+
+[`sync-config.yaml`](sync-config.yaml) is the admin-edited allow list — the
+only file that decides what is auto-ingested. Images map to tag lists;
+everything not listed is denied. Settings inherit image → tag:
+
+```yaml
+images:
+  - repo: dhi-python
+    requireVex: true        # fail verify if OpenVEX is absent (tags may override)
+    tags:
+      - 3-debian            # plain string inherits the image defaults
+      - tag: 3.13-debian
+        hold: true          # THE QUARANTINE LIST: sync + gate, never promote
+```
+
+`hold` is enforced in the promote gate itself, not merely skipped in the
+workflow — a re-run of the promote step alone cannot slip a held tag into
+prod (`FORCE_PROMOTE=1 ALLOW_UNSAFE=1` is the only, recorded, override). Held
+tags are polled against **quarantine**, their permitted home, so they stay
+fresh for testing without re-syncing every tick.
+
+[`STATUS.md`](STATUS.md) is the generated tracking view: for every allow-list
+entry, the latest upstream digest, the exact digest prod serves (deploy by
+it), the quarantine state, and a classification — `current` / `stale` /
+`blocked` / `held-*` / `missing`. CI regenerates it after every sync and poll
+run and commits it only when it changed, so its git history is a free audit
+trail of every digest movement; `make status` refreshes it on demand. It is a
+derived view: the registry remains authoritative.
+
 ## Design invariants
 
 Breaking any of these invalidates the attestations, which defeats the point.
@@ -251,6 +281,7 @@ run` triggers:
 ```bash
 make inspect REPO=dhi-node TAG=26-debian13   # diagnostic: are attestations visible?
 make run     REPO=dhi-node TAG=26-debian13   # full pipeline, stops at the first failed gate
+make status                                  # refresh STATUS.md, the tracking dashboard
 make watch                                   # follow the run
 ```
 
@@ -372,7 +403,7 @@ un-VEXed HIGH/CRITICAL findings block promotion.
 ## Offline tests
 
 ```bash
-make test    # 85 assertions, no network / registry / cloud credentials
+make test    # 105 assertions, no network / registry / cloud credentials
 make lint    # shellcheck: remaining scripts, tests, and every run block in the action YAMLs
 ```
 
@@ -386,8 +417,9 @@ programs (`scripts/lib/*.jq`) are tested as the files CI invokes.
 |---|---|
 | `test-classify.sh` (26) | Attestation classification under both storage conventions, missing-VEX, zero-referrer, `REQUIRE_VEX` policy override |
 | `test-referrers-copy.sh` (13) | Real `regctl` copies between `ocidir://` layouts: the silent `--external` failure, naive-copy attestation loss, native referrers at the target, payload-level type resolution |
-| `test-gate-safety.sh` (10) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest |
+| `test-gate-safety.sh` (12) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest, sync-config.yaml hold |
 | `test-vex-normalize.sh` (16) | Source→binary PURL remapping, one-to-many, epoch handling, version-mismatch refusal, and that no status/justification/CVE is ever altered |
+| `test-expand-config.sh` (18) | sync-config.yaml expansion: requireVex/hold inheritance (including explicit tag-level `false` over image-level `true`), and that a config typo fails loudly rather than silently shrinking the allow list |
 | `test-relay.sh` (20) | Runs the real webhook relay on loopback: secret-path auth, payload validation, repo allow-list, tag filtering, dedupe, and fail-closed misconfiguration |
 
 `test-gate-safety.sh` exists because of a real bug: a scan stage died before

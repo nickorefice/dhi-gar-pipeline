@@ -77,7 +77,7 @@ permissions:
   id-token: write
 
 jobs:
-  # A scheduled run fans out over sync-config.json; a dispatch run handles one tag.
+  # A scheduled run fans out over sync-config.yaml; a dispatch run handles one tag.
   # Building the matrix in a separate job keeps the tag list reviewable as data.
   plan:
     runs-on: ubuntu-latest
@@ -218,7 +218,12 @@ jobs:
           tag: ${{ matrix.tag }}
           skip-vex: ${{ matrix.skipVex }}
 
+      # Held tags (sync-config.yaml hold list) stop here, green: sync and both
+      # gates ran; promotion is withheld by policy. Skipping the step keeps the
+      # run legible; the promote gate itself ALSO refuses held tags, so a
+      # re-run of this step alone cannot slip one through.
       - name: 40 Promote to prod
+        if: matrix.hold != true
         uses: ./.github/actions/promote
         with:
           repo: ${{ matrix.repo }}
@@ -233,6 +238,7 @@ jobs:
         with:
           repo: ${{ matrix.repo }}
           tag: ${{ matrix.tag }}
+          hold: ${{ matrix.hold }}
 
       - name: Upload reports as workflow artifacts
         if: always()
@@ -279,3 +285,49 @@ jobs:
             echo
             echo "The image remains in quarantine and was **not** promoted."
           } >>"$GITHUB_STEP_SUMMARY"
+
+  # Refresh STATUS.md -- the tracking dashboard -- after every run that got as
+  # far as planning. `always()` on purpose: a failed or held gate is exactly
+  # when the dashboard should change (a tag flips to `blocked`/`held-*`), and
+  # an empty matrix still deserves a fresh "Updated:" stamp so a quiet poll is
+  # distinguishable from a dead one.
+  status:
+    needs: [plan, sync]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commits STATUS.md when it changed
+      id-token: write   # WIF, to read the GAR digests
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GAR_LOCATION: ${{ vars.GAR_LOCATION }}
+      GAR_QUARANTINE_REPO: ${{ vars.GAR_QUARANTINE_REPO }}
+      GAR_PROD_REPO: ${{ vars.GAR_PROD_REPO }}
+      DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub (DHI mirrors are private)
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
+      - name: Install regctl
+        uses: ./.github/actions/install-tools
+        with:
+          tools: regctl
+
+      - name: Authenticate to GCP (WIF)
+        uses: ./.github/actions/gar-auth
+        with:
+          workload-identity-provider: ${{ vars.WIF_PROVIDER }}
+          service-account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Regenerate and commit STATUS.md
+        uses: ./.github/actions/status
+        with:
+          commit: "true"
