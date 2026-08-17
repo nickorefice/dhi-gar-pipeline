@@ -88,10 +88,16 @@ runs:
         # and working directory mounted at their own paths, so credential
         # stores (~/.regctl, ~/.docker), trivy's DB cache (~/.cache/trivy),
         # and every --output/--vex file under the workspace behave exactly as
-        # a host binary would. stdin passes through (-i) because the library
-        # logs in with --pass-stdin. TRIVY_* env is forwarded when set --
+        # a host binary would. TRIVY_* env is forwarded when set --
         # TRIVY_DB_REPOSITORY pins the DB registry and TRIVY_USERNAME/
         # TRIVY_PASSWORD are the library's fallback credentials.
+        #
+        # stdin is attached (-i) ONLY when the arguments say the tool will
+        # read it (--pass-stdin). `docker run -i` consumes the caller's stdin
+        # unconditionally, so an always-on -i makes the first wrapped call
+        # inside a `while read` loop swallow the loop's remaining input --
+        # observed in production as STATUS.md and the poll silently shrinking
+        # to their first config entry.
         #
         # No fallback to a release binary on pull failure, deliberately: the
         # point of running the hardened images is the supply chain, and
@@ -108,7 +114,14 @@ runs:
         # $name -- runs the org's mirrored DHI image: $image
         # Written by .github/actions/install-tools; call sites are unchanged.
         set -euo pipefail
-        exec docker run --rm -i \\
+        # Attach stdin only when the tool will actually read it: docker run -i
+        # consumes the caller's stdin unconditionally, which makes the first
+        # wrapped call inside a \`while read\` loop swallow the loop's input.
+        interactive=()
+        for a in "\$@"; do
+          [[ "\$a" == "--pass-stdin" ]] && interactive=(-i)
+        done
+        exec docker run --rm \${interactive[@]+"\${interactive[@]}"} \\
           --user "\$(id -u):\$(id -g)" \\
           -e HOME="\$HOME" \\
           -e TRIVY_DB_REPOSITORY -e TRIVY_USERNAME -e TRIVY_PASSWORD \\
