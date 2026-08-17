@@ -58,7 +58,7 @@ built so a leaked URL is a nuisance rather than a breach:
 | `ALLOWED_REPOS` | A leaked URL cannot name an arbitrary image; only allow-listed Hub repos are accepted |
 | `TAG_ALLOW` / `TAG_DENY` | Only tags you already sync can be triggered |
 | Dedupe on `repo:tag:pushed_at` | Replaying a captured payload is a no-op |
-| Workflow re-checks against `sync-config.json` | Even a compromised relay cannot make CI sync an unreviewed tag |
+| Workflow re-checks against `sync-config.yaml` | Even a compromised relay cannot make CI sync an unreviewed tag |
 
 Worst case with the URL in hand: someone re-triggers a sync of a tag you already
 sync, at a digest the gates still have to pass. Rotate by changing
@@ -156,7 +156,7 @@ curl -X POST -H 'Content-Type: application/json' \
 In this POC the daily poll IS the trigger. If you deploy the relay, the poll
 demotes to a **reconciliation backstop** — do not remove it. Webhook deliveries
 get dropped, relays get redeployed, and Docker Hub does not guarantee delivery.
-A daily sweep over `sync-config.json` catches whatever the event stream missed;
+A daily sweep over `sync-config.yaml` catches whatever the event stream missed;
 `regsync check` suits the same role if you would rather reconcile declaratively.
 
 ## Known limitations

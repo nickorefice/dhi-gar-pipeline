@@ -19,6 +19,13 @@ inputs:
   tag:
     description: Tag whose evidence is being exported
     required: true
+  hold:
+    description: >-
+      'true' when this tag is on the sync-config.yaml hold list. A held run
+      records outcome "held" -- gates ran, promotion withheld by policy --
+      instead of being mislabeled as a gate failure.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -27,6 +34,7 @@ runs:
       env:
         REPO: ${{ inputs.repo }}
         TAG: ${{ inputs.tag }}
+        HOLD: ${{ inputs.hold || 'false' }}
       run: |
         set -euo pipefail
         # shellcheck disable=SC1091
@@ -51,6 +59,12 @@ runs:
           OUTCOME="promoted"
           SRC_REPO="$(gar_repo_path prod)"
           LOCATION="$(jq -r '.targets.prod.digestRef' "$RUN_MANIFEST")"
+        elif [[ "${HOLD:-false}" == "true" ]]; then
+          # Held is not blocked: the gates may be green; promotion is withheld
+          # by policy (sync-config.yaml). The audit record must say which.
+          OUTCOME="held"
+          SRC_REPO="$(gar_repo_path quarantine)"
+          LOCATION="$(jq -r '.targets.quarantine.digestRef // empty' "$RUN_MANIFEST")"
         else
           OUTCOME="blocked"
           SRC_REPO="$(gar_repo_path quarantine)"
@@ -85,7 +99,7 @@ runs:
 
         INVENTORY="$RUN_DIR/inventory-${OUTCOME/promoted/prod}.json"
         [[ -f "$INVENTORY" ]] || INVENTORY="$RUN_DIR/inventory-prod.json"
-        [[ -f "$INVENTORY" ]] || INVENTORY="$RUN_DIR/inventory-quarantine.json"
+        [[ -f "$INVENTORY" ]] || INVENTORY="$RUN_DIR/inventory-quarantine.json"   # blocked and held land here
         if [[ ! -f "$INVENTORY" ]]; then
           log "no cached inventory; querying referrers now"
           REF="$RUN_DIR/referrers-evidence.json"
@@ -157,6 +171,23 @@ runs:
                 reason: (if $verify != "pass" then "attestation verification failed" else "vulnerability scan gate failed" end) }' \
              >"$BUNDLE/failure-report.json"
           log "  failure-report.json"
+        fi
+
+        # A held run gets the same explicit treatment: an auditor must be able
+        # to tell "policy withheld this" from "a gate refused this".
+        if [[ "$OUTCOME" == "held" ]]; then
+          jq -n --arg at "$(_ts)" --arg digest "$INDEX_DIGEST" \
+             --arg verify "$VERIFY_STATUS" --arg scan "$SCAN_STATUS" \
+             --arg location "$LOCATION" \
+             '{ outcome: "held",
+                at: $at,
+                digest: $digest,
+                gates: { verify: $verify, scan: $scan },
+                imageLocation: $location,
+                statement: "This image is HELD by policy (sync-config.yaml hold flag). The gates ran; promotion to the production registry is withheld until an admin removes the hold. The image remains in quarantine.",
+                reason: "held by sync-config.yaml" }' \
+             >"$BUNDLE/hold-report.json"
+          log "  hold-report.json"
         fi
 
         # -------------------------------------------------------------------

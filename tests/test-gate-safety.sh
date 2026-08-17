@@ -109,6 +109,39 @@ check "verify never run is refused"              "refused" "$(try_promote)"
 make_manifest fail "$DIGEST" pass "$DIGEST"
 check "verify=fail is refused"                   "refused" "$(try_promote)"
 
+echo "== the hold list: green gates are not enough for a held tag"
+# A tag held in sync-config.yaml must be refused by the gate check itself --
+# skipping the promote step in the workflow is legibility, not enforcement.
+# Requires the same YAML converter as the library (skip counts as pass=0/fail=0).
+if python3 -c 'import yaml' 2>/dev/null; then
+  cat >"$WORK/held-config.yaml" <<'EOF'
+images:
+  - repo: gatetest
+    tags:
+      - tag: v1
+        hold: true
+EOF
+  try_promote_held() { # extra env via args, e.g. FORCE_PROMOTE=1
+    local out
+    # shellcheck disable=SC2016  # $0 must expand inside bash -c, not here
+    out="$(cd "$ROOT" && env OUT_DIR="$WORK/out" REPO=gatetest TAG=v1 \
+          GCP_PROJECT_ID=test-project CONFIG_ENV=/dev/null DHI_REPO_ROOT="$ROOT" \
+          SYNC_CONFIG="$WORK/held-config.yaml" "$@" \
+          bash -c 'source "$0" && load_manifest && promote_gate_check' "$LIB_FILE" 2>&1)"
+    if grep -qE 'refusing to promote|do not belong to the digest|held by policy' <<<"$out"; then
+      echo "refused"
+    else
+      echo "proceeded"
+    fi
+  }
+
+  make_manifest pass "$DIGEST" pass "$DIGEST"
+  check "held tag refused even with both gates green" "refused"   "$(try_promote_held)"
+  check "FORCE_PROMOTE+ALLOW_UNSAFE overrides a hold" "proceeded" "$(try_promote_held FORCE_PROMOTE=1 ALLOW_UNSAFE=1)"
+else
+  echo "  skip  hold cases (python3+PyYAML not available)"
+fi
+
 echo "== digest binding: a pass must belong to the digest being promoted"
 make_manifest pass "$OTHER" pass "$DIGEST"
 check "verify verdict for a DIFFERENT digest is refused" "refused" "$(try_promote)"

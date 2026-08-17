@@ -1,11 +1,14 @@
 name: Plan the tag matrix
 description: >-
   Decide which repo:tag pairs this run will sync. A scheduled (or poll=true)
-  run compares every sync-config.json tag against prod via the pipeline
-  library's check_current (two HEAD requests per tag) and emits only the tags
-  whose upstream digest differs; a workflow_dispatch run emits exactly the tag
-  asked for; a repository_dispatch run re-checks the relay's payload against
-  sync-config.json so policy lives in one reviewed place. The poll path needs
+  run compares every sync-config.yaml entry against its target via the
+  pipeline library's check_current (two HEAD requests per tag; held entries
+  are measured against quarantine) and emits only the tags whose upstream
+  digest differs; a workflow_dispatch run emits exactly the tag asked for; a
+  repository_dispatch run re-checks the relay's payload against
+  sync-config.yaml so policy lives in one reviewed place. Matrix entries
+  carry `hold` from the config -- a held tag syncs and gates but is never
+  promoted, and a manual dispatch cannot un-hold it. The poll path needs
   regctl on PATH and GAR_ACCESS_TOKEN / DOCKERHUB_* / GCP_PROJECT_ID /
   GAR_LOCATION / GAR_PROD_REPO / DOCKERHUB_ORG in the environment.
 inputs:
@@ -94,7 +97,7 @@ runs:
           if (( cc_rc != 0 )); then
             echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
           fi
-          matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
+          matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false, hold: (.hold // false)})}' <<<"$stale")"
           {
             if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
               echo "### Poll: everything current"
@@ -115,35 +118,42 @@ runs:
             if [[ "$IN_POLL" == "true" ]]; then
               run_poll
             else
+              # hold comes ONLY from the config: a manual dispatch of a held
+              # tag must not be able to promote it. Unlisted tags (demo runs)
+              # default to not-held.
+              hold=false
+              if [[ -f "${SYNC_CONFIG:-$REPO_ROOT/sync-config.yaml}" ]]; then
+                hold="$(load_sync_config | jq -r --arg r "$IN_REPO" --arg t "$IN_TAG" \
+                          '[.[] | select(.repo == $r and .tag == $t)] | (.[0].hold // false)')"
+              fi
               matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
-                --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
-                '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+                --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" --argjson h "$hold" \
+                '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv, hold: $h}]}')"
             fi
             ;;
           repository_dispatch)
             # The relay already allow-listed repo and tag, but this job re-checks
-            # against sync-config.json so policy lives in one reviewed place. A
+            # against sync-config.yaml so policy lives in one reviewed place. A
             # tag the relay would forward but config does not list produces an
             # empty matrix rather than an unreviewed sync.
             [[ "$DISPATCH_REPO" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid repo in client_payload"; exit 1; }
             [[ "$DISPATCH_TAG"  =~ ^[A-Za-z0-9._-]+$   ]] || { echo "::error::invalid tag in client_payload"; exit 1; }
-            matrix="$(jq -c --arg repo "$DISPATCH_REPO" --arg tag "$DISPATCH_TAG" \
-              '{include: [.tags[] | select(.repo == $repo and .tag == $tag)
-                          | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' \
-              sync-config.json)"
+            matrix="$(load_sync_config | jq -c --arg repo "$DISPATCH_REPO" --arg tag "$DISPATCH_TAG" \
+              '{include: [.[] | select(.repo == $repo and .tag == $tag)
+                          | {repo, tag, requireVex, skipVex: false, hold}]}')"
             if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
-              echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.json; nothing to do"
+              echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.yaml; nothing to do"
             fi
             ;;
           schedule)
             run_poll
             ;;
           *)
-            matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
+            matrix="$(load_sync_config | jq -c '{include: [.[] | {repo, tag, requireVex, skipVex: false, hold}]}')"
             ;;
         esac
         echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
         # An empty matrix makes the sync job error rather than skip, so the count
         # gates the job instead.
         echo "count=$(jq -r '.include | length' <<<"$matrix")" >>"$GITHUB_OUTPUT"
-        echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex)"' <<<"$matrix"
+        echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex) hold=\(.hold // false)"' <<<"$matrix"
