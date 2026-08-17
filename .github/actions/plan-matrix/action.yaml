@@ -1,0 +1,149 @@
+name: Plan the tag matrix
+description: >-
+  Decide which repo:tag pairs this run will sync. A scheduled (or poll=true)
+  run compares every sync-config.json tag against prod via the pipeline
+  library's check_current (two HEAD requests per tag) and emits only the tags
+  whose upstream digest differs; a workflow_dispatch run emits exactly the tag
+  asked for; a repository_dispatch run re-checks the relay's payload against
+  sync-config.json so policy lives in one reviewed place. The poll path needs
+  regctl on PATH and GAR_ACCESS_TOKEN / DOCKERHUB_* / GCP_PROJECT_ID /
+  GAR_LOCATION / GAR_PROD_REPO / DOCKERHUB_ORG in the environment.
+inputs:
+  event-name:
+    description: github.event_name of the triggering event
+    required: true
+  repo:
+    description: workflow_dispatch input -- repository under the Hub org
+    required: false
+    default: ""
+  tag:
+    description: workflow_dispatch input -- tag to sync
+    required: false
+    default: ""
+  require-vex:
+    description: workflow_dispatch input -- fail verification if OpenVEX is absent
+    required: false
+    default: "false"
+  skip-vex:
+    description: workflow_dispatch input -- negative test, scan without VEX
+    required: false
+    default: "false"
+  poll:
+    description: workflow_dispatch input -- run the scheduled-poll path by hand
+    required: false
+    default: "false"
+  dispatch-repo:
+    description: repository_dispatch client_payload.repo (untrusted)
+    required: false
+    default: ""
+  dispatch-tag:
+    description: repository_dispatch client_payload.tag (untrusted)
+    required: false
+    default: ""
+outputs:
+  matrix:
+    description: '{include: [{repo, tag, requireVex, skipVex}, ...]} for the sync job'
+    value: ${{ steps.build.outputs.matrix }}
+  count:
+    description: Number of tags in the matrix; 0 means nothing to do
+    value: ${{ steps.build.outputs.count }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/pipeline-env
+    - id: build
+      shell: bash
+      env:
+        # Via env, not inlined into the script: a webhook-supplied tag is
+        # untrusted input, and interpolating it directly into a shell command
+        # would be a script-injection hole reachable from anyone who has the
+        # relay URL.
+        EVENT_NAME: ${{ inputs.event-name }}
+        IN_REPO: ${{ inputs.repo }}
+        IN_TAG: ${{ inputs.tag }}
+        IN_REQUIRE_VEX: ${{ inputs.require-vex || 'false' }}
+        IN_SKIP_VEX: ${{ inputs.skip-vex || 'false' }}
+        IN_POLL: ${{ inputs.poll || 'false' }}
+        DISPATCH_REPO: ${{ inputs.dispatch-repo }}
+        DISPATCH_TAG: ${{ inputs.dispatch-tag }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC1091
+        source "$RUNNER_TEMP/dhi-pipeline-lib.sh"
+
+        # The poll: only tags whose upstream digest differs from prod make it
+        # into the matrix. An all-current tick produces an empty matrix and the
+        # sync job skips entirely. Shared by the schedule trigger and the
+        # manual poll=true dispatch, so what the cron runs is exactly what can
+        # be tested by hand.
+        #
+        # check_current returns 3 when an upstream digest could not be resolved
+        # (dead credential, removed tag). Its stdout is still authoritative for
+        # what it DID determine, so the run continues with that -- but
+        # annotated, because a poll that silently rots is indistinguishable
+        # from "no new tags, ever".
+        #
+        # The -e toggle: capturing in an `if` condition would suppress errexit
+        # INSIDE check_current; running the capture with -e off in the parent
+        # and -e on in the substitution shell keeps the function fail-fast.
+        run_poll() {
+          set +e
+          stale="$(set -e; check_current)"
+          cc_rc=$?
+          set -e
+          if (( cc_rc != 0 )); then
+            echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
+          fi
+          matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
+          {
+            if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
+              echo "### Poll: everything current"
+              echo ""
+              echo "No configured tag differs from prod. Nothing to do."
+            else
+              echo "### Poll: sync needed"
+              echo ""
+              echo "| Tag | Reason | Upstream digest |"
+              echo "|---|---|---|"
+              jq -r '.[] | "| \(.repo):\(.tag) | \(.reason) | `\(.srcDigest[0:29])...` |"' <<<"$stale"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+        }
+
+        case "$EVENT_NAME" in
+          workflow_dispatch)
+            if [[ "$IN_POLL" == "true" ]]; then
+              run_poll
+            else
+              matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
+                --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
+                '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
+            fi
+            ;;
+          repository_dispatch)
+            # The relay already allow-listed repo and tag, but this job re-checks
+            # against sync-config.json so policy lives in one reviewed place. A
+            # tag the relay would forward but config does not list produces an
+            # empty matrix rather than an unreviewed sync.
+            [[ "$DISPATCH_REPO" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid repo in client_payload"; exit 1; }
+            [[ "$DISPATCH_TAG"  =~ ^[A-Za-z0-9._-]+$   ]] || { echo "::error::invalid tag in client_payload"; exit 1; }
+            matrix="$(jq -c --arg repo "$DISPATCH_REPO" --arg tag "$DISPATCH_TAG" \
+              '{include: [.tags[] | select(.repo == $repo and .tag == $tag)
+                          | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' \
+              sync-config.json)"
+            if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
+              echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.json; nothing to do"
+            fi
+            ;;
+          schedule)
+            run_poll
+            ;;
+          *)
+            matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
+            ;;
+        esac
+        echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+        # An empty matrix makes the sync job error rather than skip, so the count
+        # gates the job instead.
+        echo "count=$(jq -r '.include | length' <<<"$matrix")" >>"$GITHUB_OUTPUT"
+        echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex)"' <<<"$matrix"

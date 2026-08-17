@@ -36,7 +36,7 @@ Identity Federation issues short-lived credentials per run, and there is no key.
 
 ## 2. Trigger: polling now, webhook when latency matters
 
-**The POC runs on a daily digest-compare poll** (`scripts/check-current.sh` in the
+**The POC runs on a daily digest-compare poll** (`check_current` in the pipeline library, run by the
 plan job): zero public surface, no new secrets, and immune to the open question of
 whether mirror syncs fire webhooks at all. The webhook relay is **built and
 validated end to end but not deployed** — see [relay/README.md](../relay/README.md)
@@ -88,7 +88,7 @@ webhook delivery history after the next upstream DHI release.
 **POC:** `gs://PROJECT-dhi-evidence/<repo>/<digest>/`.
 
 **Production:** the same folder structure in SharePoint, written with Microsoft
-Graph. Only `50-export-evidence.sh` changes; the layout is deliberately identical
+Graph. Only the export-evidence action changes; the layout is deliberately identical
 so the GRC team's tooling does not care which backend produced it.
 
 ```
@@ -245,7 +245,7 @@ audit record.
 Querying referrers on the index digest of a multi-platform DHI image returns
 **zero**; each platform digest returns 14–17. Any tool that resolves a tag to an
 index digest and asks for referrers there will conclude the image has no
-attestations. `20-verify.sh` queries both subjects and merges.
+attestations. The verify gate queries both subjects and merges.
 
 **[observed] Every DHI attestation carries `artifactType:
 application/vnd.in-toto+json`.** Nothing is distinguishable by `artifactType`; the

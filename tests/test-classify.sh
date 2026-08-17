@@ -15,9 +15,15 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 FIXTURES="$TESTS_DIR/fixtures"
 
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=../scripts/lib/common.sh
-source "$ROOT/scripts/lib/common.sh"
+# The shared library lives inside .github/actions/pipeline-env/action.yaml;
+# source the extracted text so the classifier plumbing under test is exactly
+# what CI runs. DHI_REPO_ROOT anchors CLASSIFY_JQ / ATTESTATION_TYPES paths.
+LIB_FILE="$(mktemp)"
+"$TESTS_DIR/extract-pipeline-lib.sh" >"$LIB_FILE"
+export DHI_REPO_ROOT="$ROOT"
+# shellcheck disable=SC1090  # generated from the pipeline-env action YAML
+source "$LIB_FILE"
+rm -f "$LIB_FILE"
 
 pass=0; fail=0
 
@@ -56,7 +62,7 @@ check "openvex versioned ns"   "vex-openvex"              "$(jq -r '.artifacts[2
 check "vuln report classified" "vuln-report-intoto"       "$(jq -r '.artifacts[3].class' <<<"$out")"
 # A generic Docker attestation manifest with no predicate annotation must fall
 # through to the generic class, NOT be counted toward a required group -- it
-# needs deep inspection (see 90-inspect-referrers.sh) before it means anything.
+# needs deep inspection (see the inspect-referrers workflow) before it means anything.
 check "bare attestation manifest" "attestation-manifest-generic" "$(jq -r '.artifacts[4].class' <<<"$out")"
 check "generic has no group"   "null"                     "$(jq -r '.artifacts[4].group' <<<"$out")"
 

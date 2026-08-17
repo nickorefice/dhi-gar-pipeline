@@ -5,7 +5,7 @@
 > payload posted at the relay produced a `204` from GitHub, a
 > `repository_dispatch` run, and a green pipeline for `dhi-node:24-debian13`.
 > The POC's operative trigger is instead the **daily scheduled poll** in
-> `sync-dhi.yaml`: `scripts/check-current.sh` compares upstream digests against
+> `sync-dhi.yaml`: the pipeline library’s `check_current` compares upstream digests against
 > prod and runs the pipeline only for tags that changed. That gives ~24h
 > worst-case latency with **zero public surface and no new secrets**.
 >

@@ -1,0 +1,38 @@
+name: 20 Verify gate
+description: >-
+  GATE 1. Did the attestations survive the copy, and is it still the same
+  image? The full check lives in run_verify inside the pipeline library
+  (.github/actions/pipeline-env/action.yaml) because the promote stage re-runs
+  the identical check against prod after its copy -- one implementation, two
+  call sites. Queries referrers at both the index and per-platform digests
+  (DHI attaches them per-platform; the index alone reports zero), opens
+  payloads whose type is not on the descriptor, and fails closed. A failed
+  gate leaves the image in quarantine and still writes verify-report.json.
+inputs:
+  repo:
+    description: Repository under the Hub org (e.g. dhi-node)
+    required: true
+  tag:
+    description: Tag being verified
+    required: true
+  require-vex:
+    description: >-
+      'true' fails verification if OpenVEX is absent. Default is warn-only,
+      because Alpine DHI ships no OpenVEX and requiring it unconditionally
+      fails every Alpine tag.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/pipeline-env
+    - shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+        TAG: ${{ inputs.tag }}
+        REQUIRE_VEX: ${{ inputs.require-vex == 'true' && '1' || '0' }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC1091
+        source "$RUNNER_TEMP/dhi-pipeline-lib.sh"
+        run_verify

@@ -2,7 +2,7 @@ name: Sync DHI to GAR
 
 # Triggers:
 #   schedule            -- THE POC'S OPERATIVE TRIGGER: a daily poll. The plan job
-#                          runs scripts/check-current.sh (two HEAD requests per
+#                          runs the pipeline library's check_current (two HEAD requests per
 #                          tag) and builds a matrix of only the tags whose
 #                          upstream digest differs from prod, so an all-current
 #                          day costs one short plan job (~1 min) and the full
@@ -17,6 +17,16 @@ name: Sync DHI to GAR
 #                          NOT deployed for this POC: daily latency is acceptable
 #                          here, and it avoids a public endpoint.
 #   workflow_dispatch   -- on demand, for the demo and one-off syncs.
+#
+# Structure: this file is orchestration only -- triggers, concurrency, and the
+# plan -> sync fan-out. THE PIPELINE LOGIC LIVES IN THE ACTION YAMLS: each step
+# is a composite action under .github/actions/ carrying its stage's full bash
+# body, and the plumbing they share (config, auth, run manifest, gate
+# lifecycle, verify/check-current/gate-check bodies) is the library embedded in
+# .github/actions/pipeline-env/action.yaml. The offline tests extract and
+# source that same library text, so what is tested is what runs. Only the jq
+# programs (scripts/lib/*.jq) and attestation-types.json remain on disk as
+# shared data files.
 
 on:
   repository_dispatch:
@@ -74,125 +84,54 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
       count: ${{ steps.build.outputs.count }}
+    env:
+      # For check_current on the poll path. Non-secret identifiers except the
+      # Hub credential; useless without an OIDC token from this repo.
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GAR_LOCATION: ${{ vars.GAR_LOCATION }}
+      GAR_PROD_REPO: ${{ vars.GAR_PROD_REPO }}
+      DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
     steps:
       - uses: actions/checkout@v4
 
       # Scheduled ticks compare digests before deciding anything, which needs
-      # regctl and a GAR token. Dispatch-driven runs skip all three steps -- they
+      # regctl and a GAR token. Dispatch-driven runs skip these steps -- they
       # were asked for explicitly and always run.
+      - name: Login to Docker Hub (poll path only -- DHI mirrors are private)
+        if: github.event_name == 'schedule' || inputs.poll == true
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
       - name: Install regctl (poll path only)
         if: github.event_name == 'schedule' || inputs.poll == true
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /usr/local/bin/regctl \
-            https://github.com/regclient/regclient/releases/download/v0.11.5/regctl-linux-amd64
-          chmod +x /usr/local/bin/regctl
-
-      - id: auth-plan
-        name: Authenticate to GCP (WIF, poll path only)
-        if: github.event_name == 'schedule' || inputs.poll == true
-        uses: google-github-actions/auth@v2
+        uses: ./.github/actions/install-tools
         with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
-          token_format: access_token
+          tools: regctl
+
+      - name: Authenticate to GCP (WIF, poll path only)
+        if: github.event_name == 'schedule' || inputs.poll == true
+        uses: ./.github/actions/gar-auth
+        with:
+          workload-identity-provider: ${{ vars.WIF_PROVIDER }}
+          service-account: ${{ vars.WIF_SERVICE_ACCOUNT }}
 
       - id: build
         name: Build the tag matrix
-        env:
-          # Via env, not inlined into the script: a webhook-supplied tag is
-          # untrusted input, and interpolating it directly into a shell command
-          # would be a script-injection hole reachable from anyone who has the
-          # relay URL.
-          EVENT_NAME: ${{ github.event_name }}
-          IN_REPO: ${{ github.event.inputs.repo }}
-          IN_TAG: ${{ github.event.inputs.tag }}
-          IN_REQUIRE_VEX: ${{ github.event.inputs.require_vex || 'false' }}
-          IN_SKIP_VEX: ${{ github.event.inputs.skip_vex || 'false' }}
-          IN_POLL: ${{ github.event.inputs.poll || 'false' }}
-          DISPATCH_REPO: ${{ github.event.client_payload.repo }}
-          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
-          # For check-current.sh on scheduled ticks.
-          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          GAR_LOCATION: ${{ vars.GAR_LOCATION }}
-          GAR_PROD_REPO: ${{ vars.GAR_PROD_REPO }}
-          DOCKERHUB_ORG: ${{ vars.DOCKERHUB_ORG }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
-          GAR_ACCESS_TOKEN: ${{ steps.auth-plan.outputs.access_token }}
-        run: |
-          set -euo pipefail
-
-          # The poll: only tags whose upstream digest differs from prod make it
-          # into the matrix. An all-current tick produces an empty matrix and the
-          # sync job skips entirely. Shared by the schedule trigger and the
-          # manual poll=true dispatch, so what the cron runs is exactly what can
-          # be tested by hand.
-          #
-          # check-current exits 3 when an upstream digest could not be resolved
-          # (dead credential, removed tag). Its stdout is still authoritative for
-          # what it DID determine, so the run continues with that -- but
-          # annotated, because a poll that silently rots is indistinguishable
-          # from "no new tags, ever".
-          run_poll() {
-            if stale="$(./scripts/check-current.sh)"; then
-              :
-            else
-              echo "::warning title=check-current::one or more upstream digests could not be resolved -- see the step log; a dead Hub credential would silently disable this poll"
-            fi
-            matrix="$(jq -c '{include: map({repo, tag, requireVex: (.requireVex // false), skipVex: false})}' <<<"$stale")"
-            {
-              if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
-                echo "### Poll: everything current"
-                echo ""
-                echo "No configured tag differs from prod. Nothing to do."
-              else
-                echo "### Poll: sync needed"
-                echo ""
-                echo "| Tag | Reason | Upstream digest |"
-                echo "|---|---|---|"
-                jq -r '.[] | "| \(.repo):\(.tag) | \(.reason) | `\(.srcDigest[0:29])...` |"' <<<"$stale"
-              fi
-            } >>"$GITHUB_STEP_SUMMARY"
-          }
-
-          case "$EVENT_NAME" in
-            workflow_dispatch)
-              if [[ "$IN_POLL" == "true" ]]; then
-                run_poll
-              else
-                matrix="$(jq -cn --arg repo "$IN_REPO" --arg tag "$IN_TAG" \
-                  --argjson rv "$IN_REQUIRE_VEX" --argjson sv "$IN_SKIP_VEX" \
-                  '{include: [{repo: $repo, tag: $tag, requireVex: $rv, skipVex: $sv}]}')"
-              fi
-              ;;
-            repository_dispatch)
-              # The relay already allow-listed repo and tag, but this job re-checks
-              # against sync-config.json so policy lives in one reviewed place. A
-              # tag the relay would forward but config does not list produces an
-              # empty matrix rather than an unreviewed sync.
-              [[ "$DISPATCH_REPO" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::invalid repo in client_payload"; exit 1; }
-              [[ "$DISPATCH_TAG"  =~ ^[A-Za-z0-9._-]+$   ]] || { echo "::error::invalid tag in client_payload"; exit 1; }
-              matrix="$(jq -c --arg repo "$DISPATCH_REPO" --arg tag "$DISPATCH_TAG" \
-                '{include: [.tags[] | select(.repo == $repo and .tag == $tag)
-                            | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' \
-                sync-config.json)"
-              if [[ "$(jq -r '.include | length' <<<"$matrix")" == "0" ]]; then
-                echo "::warning title=Not in sync-config::$DISPATCH_REPO:$DISPATCH_TAG is not listed in sync-config.json; nothing to do"
-              fi
-              ;;
-            schedule)
-              run_poll
-              ;;
-            *)
-              matrix="$(jq -c '{include: [.tags[] | {repo, tag, requireVex: (.requireVex // false), skipVex: false}]}' sync-config.json)"
-              ;;
-          esac
-          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
-          # An empty matrix makes the sync job error rather than skip, so the count
-          # gates the job instead.
-          echo "count=$(jq -r '.include | length' <<<"$matrix")" >>"$GITHUB_OUTPUT"
-          echo "Planned:"; jq -r '.include[] | "  \(.repo):\(.tag)  requireVex=\(.requireVex) skipVex=\(.skipVex)"' <<<"$matrix"
+        uses: ./.github/actions/plan-matrix
+        with:
+          event-name: ${{ github.event_name }}
+          repo: ${{ github.event.inputs.repo }}
+          tag: ${{ github.event.inputs.tag }}
+          require-vex: ${{ github.event.inputs.require_vex || 'false' }}
+          skip-vex: ${{ github.event.inputs.skip_vex || 'false' }}
+          poll: ${{ github.event.inputs.poll || 'false' }}
+          dispatch-repo: ${{ github.event.client_payload.repo }}
+          dispatch-tag: ${{ github.event.client_payload.tag }}
 
   sync:
     needs: plan
@@ -202,11 +141,10 @@ jobs:
       fail-fast: false          # one tag failing its gate must not cancel the others
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
-      REPO: ${{ matrix.repo }}
-      TAG: ${{ matrix.tag }}
-      REQUIRE_VEX: ${{ matrix.requireVex && '1' || '0' }}
       # Repo variables, written by `make gh-vars` from the Terraform outputs.
       # Non-secret identifiers: useless without an OIDC token from this repo.
+      # The stage actions' library reads this environment the same way it reads
+      # config.env locally; per-tag values (REPO, TAG) arrive as action inputs.
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GAR_LOCATION: ${{ vars.GAR_LOCATION }}
       GAR_QUARANTINE_REPO: ${{ vars.GAR_QUARANTINE_REPO }}
@@ -224,92 +162,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------------
-      # Toolchain. Pinned versions so a demo cannot drift under you.
-      # ---------------------------------------------------------------------
-      - name: Install regctl
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /usr/local/bin/regctl \
-            https://github.com/regclient/regclient/releases/download/v0.11.5/regctl-linux-amd64
-          chmod +x /usr/local/bin/regctl
-          regctl version --format '{{.VCSTag}}'
-
-      - name: Install Trivy
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/trivy.tgz \
-            https://github.com/aquasecurity/trivy/releases/download/v0.73.0/trivy_0.73.0_Linux-64bit.tar.gz
-          tar xzf /tmp/trivy.tgz -C /tmp trivy
-          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
-          trivy --version | head -1
-
-      - name: Install Grype
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/grype.tgz \
-            https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_amd64.tar.gz
-          tar xzf /tmp/grype.tgz -C /tmp grype
-          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
-
-      - name: Install docker scout
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/scout.tgz \
-            https://github.com/docker/scout-cli/releases/download/v1.24.0/docker-scout_1.24.0_linux_amd64.tar.gz
-          tar xzf /tmp/scout.tgz -C /tmp docker-scout
-          mkdir -p "$HOME/.docker/cli-plugins"
-          install -m 0755 /tmp/docker-scout "$HOME/.docker/cli-plugins/docker-scout"
-
-      # ---------------------------------------------------------------------
-      # GCP auth via Workload Identity Federation. No service-account key.
-      # ---------------------------------------------------------------------
-      - id: auth
-        name: Authenticate to GCP (WIF)
-        uses: google-github-actions/auth@v2
+      # regctl and trivy run from the org's mirrored DHI images behind
+      # transparent wrappers -- the tools that gate the images carry the same
+      # provenance story as the images they gate. The mirrors are private, so
+      # docker authenticates first (natively, not via shell). Version pins
+      # live in the install-tools action's input defaults.
+      - name: Login to Docker Hub (DHI mirrors are private)
+        uses: docker/login-action@v3
         with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
-          # An access token, so the scripts can hand it straight to regctl and
-          # never touch a key file.
-          token_format: access_token
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
 
-      - name: Export the GAR token
-        run: echo "GAR_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >>"$GITHUB_ENV"
+      - name: Install pinned toolchain
+        uses: ./.github/actions/install-tools
+        with:
+          tools: regctl trivy scout
 
-      - uses: google-github-actions/setup-gcloud@v2
+      # GCP auth via Workload Identity Federation. No service-account key.
+      # gcloud is included for the evidence-export stage.
+      - name: Authenticate to GCP (WIF)
+        uses: ./.github/actions/gar-auth
+        with:
+          workload-identity-provider: ${{ vars.WIF_PROVIDER }}
+          service-account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          setup-gcloud: "true"
 
       # ---------------------------------------------------------------------
-      # Pipeline. Steps map 1:1 onto the scripts, which are the same code path a
-      # developer runs locally -- only the source of GCP credentials differs.
+      # Pipeline. One composite action per stage; each wraps the script a
+      # developer runs locally.
       # ---------------------------------------------------------------------
       - name: 00 Resolve tag to digest
-        run: ./scripts/00-resolve.sh
+        uses: ./.github/actions/resolve
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
 
       - name: 10 Sync to quarantine (image + referrers)
-        run: ./scripts/10-sync.sh
+        uses: ./.github/actions/sync
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
 
       - name: 20 Verify gate (attestations survived, digest unchanged)
-        run: ./scripts/20-verify.sh
+        uses: ./.github/actions/verify
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
+          require-vex: ${{ matrix.requireVex }}
 
-      - name: 30 Scan gate (Trivy with VEX; Grype report-only)
-        run: |
-          if [[ "${{ matrix.skipVex }}" == "true" ]]; then
-            echo "::warning title=Negative test::Scanning with --skip-vex; the gate is expected to fail"
-            ./scripts/30-scan.sh --skip-vex
-          else
-            ./scripts/30-scan.sh
-          fi
+      - name: 30 Scan gate (Trivy with VEX)
+        uses: ./.github/actions/scan
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
+          skip-vex: ${{ matrix.skipVex }}
 
       - name: 40 Promote to prod
-        run: ./scripts/40-promote.sh
+        uses: ./.github/actions/promote
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
 
       # Evidence is exported even when a gate failed: "we caught this and stopped"
       # is exactly what an auditor needs to see, and an empty bucket is
       # indistinguishable from a gate that never ran.
       - name: 50 Export evidence
         if: always()
-        run: ./scripts/50-export-evidence.sh
+        uses: ./.github/actions/export-evidence
+        with:
+          repo: ${{ matrix.repo }}
+          tag: ${{ matrix.tag }}
 
       - name: Upload reports as workflow artifacts
         if: always()
@@ -321,7 +244,6 @@ jobs:
             out/**/verify-report*.json
             out/**/scan-report.json
             out/**/trivy-report*.json
-            out/**/grype-report.json
             out/**/scout-compare.txt
             out/**/inventory-*.json
             out/**/evidence/manifest.json
@@ -332,6 +254,9 @@ jobs:
       # anyone opening logs or downloading an artifact.
       - name: Explain a failure in the job summary
         if: failure()
+        env:
+          REPO: ${{ matrix.repo }}
+          TAG: ${{ matrix.tag }}
         run: |
           {
             echo "### ❌ \`${REPO}:${TAG}\` did not reach prod"

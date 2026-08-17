@@ -26,9 +26,15 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=../scripts/lib/common.sh
-source "$ROOT/scripts/lib/common.sh"
+# The shared library lives inside .github/actions/pipeline-env/action.yaml;
+# source the extracted text so the referrer/classify helpers under test are
+# exactly what CI runs.
+LIB_FILE="$(mktemp)"
+"$TESTS_DIR/extract-pipeline-lib.sh" >"$LIB_FILE"
+export DHI_REPO_ROOT="$ROOT"
+# shellcheck disable=SC1090  # generated from the pipeline-env action YAML
+source "$LIB_FILE"
+rm -f "$LIB_FILE"
 
 command -v regctl >/dev/null 2>&1 || { echo "regctl not installed -- run 'make tools'"; exit 1; }
 

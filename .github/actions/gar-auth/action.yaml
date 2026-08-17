@@ -1,0 +1,42 @@
+name: Authenticate to GCP (WIF)
+description: >-
+  Exchange the job's GitHub OIDC token for a short-lived GCP access token via
+  Workload Identity Federation and export it as GAR_ACCESS_TOKEN, which the
+  pipeline scripts hand straight to regctl. This is the whole reason no GCP
+  service-account key exists anywhere in this repo or its secrets. The calling
+  workflow must grant `id-token: write`.
+inputs:
+  workload-identity-provider:
+    description: Full resource name of the WIF provider (vars.WIF_PROVIDER)
+    required: true
+  service-account:
+    description: Service account to impersonate (vars.WIF_SERVICE_ACCOUNT)
+    required: true
+  setup-gcloud:
+    description: >-
+      Also install the gcloud CLI ('true'/'false'). Needed only by the
+      evidence-export stage (gcloud storage); the poll path skips it.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - id: auth
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ inputs.workload-identity-provider }}
+        service_account: ${{ inputs.service-account }}
+        # An access token, so the scripts never touch a key file.
+        token_format: access_token
+
+    - name: Export the GAR token
+      shell: bash
+      env:
+        TOKEN: ${{ steps.auth.outputs.access_token }}
+      run: |
+        # Job-level env so every subsequent step (script) can use it. The auth
+        # action has already registered the value with the log masker.
+        echo "GAR_ACCESS_TOKEN=$TOKEN" >>"$GITHUB_ENV"
+
+    - if: inputs.setup-gcloud == 'true'
+      uses: google-github-actions/setup-gcloud@v2

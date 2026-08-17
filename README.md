@@ -47,7 +47,7 @@ Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemo
                          │
                 ┌────────┴────────┐
                 │  20 verify gate │  attestations present? digest unchanged?
-                │  30 scan gate   │  Trivy + DHI VEX; Grype 2nd opinion; scout compare
+                │  30 scan gate   │  Trivy + DHI VEX; scout compare
                 └────────┬────────┘
                          │  both green (and only then)
                          ▼
@@ -58,25 +58,48 @@ Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemo
                                      ← SBOMs, provenance, VEX, gate reports
 ```
 
-**Triggering (POC):** a daily scheduled poll. The plan job runs
-`scripts/check-current.sh` — two HEAD requests per configured tag — and syncs only
+**Triggering (POC):** a daily scheduled poll. The plan job runs the pipeline
+library's `check_current` — two HEAD requests per configured tag — and syncs only
 tags whose upstream digest differs from prod, so an all-current day is a ~1-minute
-no-op (`make check` shows the same comparison locally). A Docker Hub
+no-op (`make poll` fires the same path by hand). A Docker Hub
 webhook→`repository_dispatch` relay is **built and validated but not deployed**:
 Docker Hub cannot call the GitHub API directly (no custom headers, fixed payload,
 no query-param tokens), so event-driven triggering needs a public relay endpoint,
 which this POC deliberately avoids. See [relay/README.md](relay/README.md) for the
 runbook when minute-level latency matters.
 
-| Stage | Script | Does |
+**The pipeline lives in GitHub Actions YAML.** Each stage is a composite
+action under `.github/actions/<stage>/` carrying its full bash body, and the
+plumbing every stage shares — config, auth, run manifest, the gate lifecycle,
+and the verify / check-current / gate-check bodies — is the library embedded
+in `.github/actions/pipeline-env/action.yaml`. The offline tests extract and
+source that same library text (`tests/extract-pipeline-lib.sh`), so what is
+tested is what runs. Only the jq programs (`scripts/lib/*.jq`) and
+`attestation-types.json` remain on disk as shared data files.
+
+**The pipeline's own tools run from Docker Hardened Images.** CI does not
+download regctl, trivy, or cosign release binaries: the install-tools action
+pulls the org's mirrored `dhi-regctl:0.11.5`, `dhi-trivy:0.73.0`, and
+`dhi-cosign:3.1.3` and installs transparent `/usr/local/bin/<tool>` wrappers
+that `docker run` them. The tools that gate the images carry the same signed
+provenance, SBOM, and VEX story as the images they gate — and swapping any
+of them to the FIPS build is one input override (e.g.
+`trivy-image: ...:0.73.0-fips`). If a mirror cannot be pulled the install
+fails loudly; it deliberately does **not** fall back to a GitHub release
+binary, because silently changing supply chains is the exact class of
+failure this pipeline exists to prevent. (docker scout remains a release
+binary — it is a CLI plugin — and Trivy is the sole scanner: the Grype
+second opinion was removed with it.)
+
+| Stage | Action | Does |
 |---|---|---|
-| 00 | `00-resolve.sh` | Resolve tag → digest **once**; write the run manifest |
-| 10 | `10-sync.sh` | Copy image + referrers → `dhi-quarantine` |
-| 20 | `20-verify.sh` | **Gate:** attestations survived, digest unchanged |
-| 30 | `30-scan.sh` | **Gate:** Trivy w/ VEX, Grype, `scout compare` |
-| 40 | `40-promote.sh` | Copy `dhi-quarantine` → `dhi-prod` |
-| 50 | `50-export-evidence.sh` | Write evidence bundle to GCS |
-| — | `90-inspect-referrers.sh` | Diagnostic: where are the attestations, really? |
+| 00 | `.github/actions/resolve` | Resolve tag → digest **once**; write the run manifest |
+| 10 | `.github/actions/sync` | Copy image + referrers → `dhi-quarantine` |
+| 20 | `.github/actions/verify` | **Gate:** attestations survived, digest unchanged |
+| 30 | `.github/actions/scan` | **Gate:** Trivy w/ VEX, `scout compare` |
+| 40 | `.github/actions/promote` | Copy `dhi-quarantine` → `dhi-prod` |
+| 50 | `.github/actions/export-evidence` | Write evidence bundle to GCS |
+| — | `.github/actions/inspect-referrers` | Diagnostic: where are the attestations, really? (`inspect-referrers.yaml` workflow) |
 
 ## Design invariants
 
@@ -140,10 +163,10 @@ Measured on `dhi-node:26-debian13`:
 
 Every one of those 12 was a CVE Docker had already declared `not_affected`. The
 scan ran, `--vex` was passed, no error appeared, and **nothing was suppressed** —
-the failure mode is a missing *effect*, not a wrong number. `30-scan.sh` therefore
-normalises VEX product identifiers before scanning (see [Making scanners actually
-ingest the VEX](#making-scanners-actually-ingest-the-vex)), and warns loudly if
-VEX suppresses nothing while findings remain.
+the failure mode is a missing *effect*, not a wrong number. The scan stage
+therefore normalises VEX product identifiers before scanning (see [Making
+scanners actually ingest the VEX](#making-scanners-actually-ingest-the-vex)),
+and warns loudly if VEX suppresses nothing while findings remain.
 
 **GAR supports the OCI referrers API natively** — no `sha256-<digest>` fallback
 tags were created, so referrers round-trip through the real API.
@@ -187,8 +210,9 @@ make tools      # Homebrew on macOS, release binaries on Linux
 make versions
 ```
 
-`regctl`, `regsync`, `trivy`, `grype`, `cosign`, `docker scout`, `gcloud`,
-`terraform`, `gh`, `jq`.
+`regctl`, `regsync`, `trivy`, `cosign`, `docker scout`, `gcloud`,
+`terraform`, `gh`, `jq`. (In CI, regctl / trivy / cosign run from the org's
+mirrored DHI images; `make tools` covers local use.)
 
 ## Setup
 
@@ -221,15 +245,20 @@ gh secret set DOCKERHUB_PAT      # value on stdin
 
 ## Running it
 
+The pipeline runs in GitHub Actions; the make targets are thin `gh workflow
+run` triggers:
+
 ```bash
 make inspect REPO=dhi-node TAG=26-debian13   # diagnostic: are attestations visible?
-make all     REPO=dhi-node TAG=26-debian13   # full pipeline, stops at the first failed gate
+make run     REPO=dhi-node TAG=26-debian13   # full pipeline, stops at the first failed gate
+make watch                                   # follow the run
 ```
 
 > DHI publishes **no `latest` tag**. Use a real one — `regctl tag ls
 > docker.io/<org>/dhi-node`.
 
-Reports land in `out/<repo>/<tag>/`.
+Reports are uploaded as workflow artifacts (`reports-<repo>-<tag>`) and
+summarised on the run page.
 
 ---
 
@@ -255,9 +284,9 @@ gh workflow run sync-dhi.yaml -f repo=dhi-node -f tag=26-debian13 -f require_vex
 gh run watch
 ```
 
-Or locally: `make all REPO=dhi-node TAG=26-debian13`. In production this is triggered
-by a Docker Hub webhook rather than by hand — to show that path, post a real Hub
-payload at the relay:
+(`make run REPO=dhi-node TAG=26-debian13` is the same trigger.) In production this
+is triggered by a Docker Hub webhook rather than by hand — to show that path, post
+a real Hub payload at the relay:
 
 ```bash
 curl -X POST -H 'Content-Type: application/json' \
@@ -317,18 +346,21 @@ against the registry referrers.
 Real DHI, real failure. Alpine DHI ships no OpenVEX, so with VEX required:
 
 ```bash
-REQUIRE_VEX=1 make resolve sync verify REPO=dhi-node TAG=24-alpine
+make run REPO=dhi-node TAG=24-alpine REQUIRE_VEX=1
+gh run watch
 ```
+
+The verify gate fails and the run stops before promote:
 
 ```
 [FAIL] required attestations MISSING: ["vex"] -- found ["provenance","sbom"] across 14 referrers
 ERROR verify gate failed -- image stays in quarantine, nothing promoted
 ```
 
-Then prove it did not sneak through:
+Then prove it did not sneak through — and that a promote step re-run on its own
+still refuses (the gate check reads recorded verdicts, not step ordering):
 
 ```bash
-make promote REPO=dhi-node TAG=24-alpine      # refuses; exit 1
 regctl manifest head us-central1-docker.pkg.dev/$PROJECT/dhi-prod/dhi-node:24-alpine  # 404
 ```
 
@@ -341,8 +373,14 @@ un-VEXed HIGH/CRITICAL findings block promotion.
 
 ```bash
 make test    # 85 assertions, no network / registry / cloud credentials
-make lint    # shellcheck -x
+make lint    # shellcheck: remaining scripts, tests, and every run block in the action YAMLs
 ```
+
+The suites test the code CI actually runs: `tests/extract-pipeline-lib.sh`
+extracts the pipeline library out of
+`.github/actions/pipeline-env/action.yaml` and the tests source that text
+directly, so a change to the YAML is a change to what is under test. The jq
+programs (`scripts/lib/*.jq`) are tested as the files CI invokes.
 
 | Suite | Covers |
 |---|---|

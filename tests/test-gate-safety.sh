@@ -4,18 +4,20 @@
 #
 # These exist because of a real bug, not a hypothetical one. A scan stage died on
 # a tooling error before writing its result; the PREVIOUS run's "pass" was still
-# in the run manifest; 40-promote.sh read that pass and promoted an image carrying
-# a CRITICAL CVE to the production registry, exiting 0. A crashing gate was
-# indistinguishable from a passing one.
+# in the run manifest; the promote stage read that pass and promoted an image
+# carrying a CRITICAL CVE to the production registry, exiting 0. A crashing gate
+# was indistinguishable from a passing one.
 #
 # Two mechanisms now prevent it, and both are asserted here:
 #   1. gate_begin overwrites the verdict with "running" before anything that can
 #      fail, and an EXIT trap converts a still-"running" gate into "error".
 #   2. A verdict is only usable if it recorded the digest being promoted.
 #
-# No credentials needed: the gate check runs before any registry call, so a
-# refusal is reached without touching the network. Any case that WRONGLY promotes
-# would try to authenticate -- so a test failure here is loud either way.
+# The logic under test is promote_gate_check in the pipeline library, which
+# lives inside .github/actions/pipeline-env/action.yaml -- the promote action
+# calls it before any registry operation. The tests source the extracted
+# library text, so the refusal code asserted here is byte-for-byte the code CI
+# runs. No credentials or network needed.
 #
 #   ./tests/test-gate-safety.sh
 
@@ -37,6 +39,9 @@ check() {
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+LIB_FILE="$WORK/pipeline-lib.sh"
+"$TESTS_DIR/extract-pipeline-lib.sh" >"$LIB_FILE"
 
 DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
 OTHER="sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -65,16 +70,20 @@ make_manifest() { # make_manifest <verify-status> <verify-digest> <scan-status> 
   }' >"$dir/run-manifest.json"
 }
 
-# Run 40-promote.sh against that manifest. Returns "refused" or "proceeded".
+# Run the promotion gate check exactly as the promote action does -- source the
+# library, load that manifest, call promote_gate_check. Returns "refused" or
+# "proceeded". A fresh bash -c per case so the library's set -e semantics match
+# the composite step it normally runs in.
 try_promote() {
   local out
   out="$(cd "$ROOT" && OUT_DIR="$WORK/out" REPO=gatetest TAG=v1 \
-        GCP_PROJECT_ID=test-project CONFIG_ENV=/dev/null \
-        ./scripts/40-promote.sh 2>&1)"
+        GCP_PROJECT_ID=test-project CONFIG_ENV=/dev/null DHI_REPO_ROOT="$ROOT" \
+        bash -c 'source "$0" && load_manifest && promote_gate_check' "$LIB_FILE" 2>&1)"
   if grep -qE 'refusing to promote|do not belong to the digest' <<<"$out"; then
     echo "refused"
   else
-    # Anything that got as far as authenticating or copying has already gone wrong.
+    # Anything that reached "both gates passed" (or died some other way) has
+    # already gone wrong for these cases.
     echo "proceeded"
   fi
 }

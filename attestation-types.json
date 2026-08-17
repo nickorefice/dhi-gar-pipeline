@@ -2,7 +2,7 @@
   "_comment": [
     "Classification table for OCI referrer descriptors, built from OBSERVED DHI",
     "attestations rather than from spec assumptions. Source of truth for this table:",
-    "scripts/90-inspect-referrers.sh run against nicksdemoorg/dhi-node across six",
+    "the inspect-referrers workflow run against nicksdemoorg/dhi-node across six",
     "tags (alpine, debian, fips, sfw-ent variants) on 2026-08-07.",
     "",
     "WHAT WAS ACTUALLY FOUND, and why it shapes this file:",
@@ -13,7 +13,7 @@
     "   the real work and artifactTypes are near-useless for DHI.",
     "",
     "2. Attestations attach to PER-PLATFORM manifest digests, not to the index.",
-    "   Querying referrers on the index digest returns ZERO. 20-verify.sh queries",
+    "   Querying referrers on the index digest returns ZERO. The verify gate queries",
     "   both the index and platform digests and merges.",
     "",
     "3. OpenVEX is NOT universal. Observed on debian-based tags (26-debian13,",

@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Tags the scheduled poll keeps in sync. Every 30 minutes the plan job runs",
-    "scripts/check-current.sh over this list and syncs only the entries whose",
+    "the pipeline library's check_current over this list and syncs only the entries whose",
     "upstream digest differs from prod -- so adding a tag here is a one-line,",
     "reviewable change, and a quiet poll tick costs seconds.",
     "",

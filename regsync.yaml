@@ -1,8 +1,8 @@
-# regsync.yaml -- declarative equivalent of 10-sync.sh.
+# regsync.yaml -- declarative equivalent of the sync stage.
 #
 # DOCUMENTED, NOT WIRED INTO CI. Two different jobs:
 #
-#   10-sync.sh   one tag, one run, verbose, with a pre-flight referrer count and a
+#   sync action  one tag, one run, verbose, with a pre-flight referrer count and a
 #                digest-equality assertion. Built for a demo and for a gate: every
 #                step announces what it checked.
 #

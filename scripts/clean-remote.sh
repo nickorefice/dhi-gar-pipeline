@@ -10,11 +10,58 @@
 #
 # Scoped to the two GAR repositories and the evidence bucket named in config.env.
 # It never touches anything else in the project.
+#
+# Standalone operator utility: runs on a laptop with gcloud credentials, so it
+# deliberately does NOT depend on the pipeline library embedded in
+# .github/actions/pipeline-env/action.yaml.
 
 set -euo pipefail
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=lib/common.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
+# --- minimal standalone prelude (mirrors the pipeline library's semantics) ---
+_ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log()  { printf '%s  %s\n'       "$(_ts)" "$*" >&2; }
+warn() { printf '%s  WARN  %s\n' "$(_ts)" "$*" >&2; }
+err()  { printf '%s  ERROR %s\n' "$(_ts)" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+step() { printf '\n%s  ===== %s =====\n' "$(_ts)" "$*" >&2; }
+
+need_tool() {
+  local t missing=()
+  for t in "$@"; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
+  (( ${#missing[@]} == 0 )) || die "required tool(s) not on PATH: ${missing[*]}"
+}
+
+require_vars() {
+  local missing=() v
+  for v in "$@"; do
+    if [[ -z "${!v:-}" || "${!v:-}" == REPLACE_ME* ]]; then missing+=("$v"); fi
+  done
+  (( ${#missing[@]} == 0 )) \
+    || die "missing/unset config: ${missing[*]} -- set in config.env (see config.env.example) or export"
+}
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Environment beats config.env, same as the pipeline: capture already-set keys
+# first and re-apply them after sourcing.
+if [[ -f "$REPO_ROOT/config.env" ]]; then
+  saved="$(mktemp)"
+  while IFS= read -r key; do
+    [[ -n "${!key:-}" ]] && printf '%s=%q\n' "$key" "${!key}" >>"$saved"
+  done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$REPO_ROOT/config.env")
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/config.env"
+  # shellcheck disable=SC1090
+  source "$saved"
+  set +a
+  rm -f "$saved"
+fi
+: "${GAR_LOCATION:=us-central1}"
+: "${GAR_QUARANTINE_REPO:=dhi-quarantine}"
+: "${GAR_PROD_REPO:=dhi-prod}"
+GAR_HOST="${GAR_LOCATION}-docker.pkg.dev"
+# --- end prelude ---
 
 need_tool gcloud jq
 require_vars GCP_PROJECT_ID EVIDENCE_BUCKET
