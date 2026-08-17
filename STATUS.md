@@ -5,7 +5,7 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-08-17T21:12:57Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/32069343995)
+Updated: 2026-08-17T21:18:17Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/32069343995)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
