@@ -157,6 +157,18 @@ jobs:
       # "unauthorized" that reads like a permissions problem.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
+      # The gate threshold, settable as a repo variable. Without this the value
+      # was reachable only through config.env, which CI never reads -- so the
+      # documented knob silently had no effect in the only place the gate runs.
+      #
+      # It matters more than it looks. Measured on dhi-node:26-debian13 with
+      # docker-scout: the vendor's VEX suppresses 8 findings and ALL EIGHT ARE
+      # LOW, so at HIGH,CRITICAL the skip-vex negative test has nothing to block
+      # on and `make demo-fail` passes. Set the variable to
+      # LOW,MEDIUM,HIGH,CRITICAL to make that demo show a real refusal. (Note
+      # severities are scanner-specific: the same CVEs were HIGH/CRITICAL under
+      # Trivy, which is why the old 12-finding baseline differs.)
+      SCAN_SEVERITY: ${{ vars.SCAN_SEVERITY || 'HIGH,CRITICAL' }}
 
     steps:
       - uses: actions/checkout@v4

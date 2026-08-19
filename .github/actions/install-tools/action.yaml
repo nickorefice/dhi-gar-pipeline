@@ -144,10 +144,33 @@ runs:
         for a in "\$@"; do
           [[ "\$a" == "--pass-stdin" ]] && interactive=(-i)
         done
+        # A CONFIGURED PROXY MEANS THE CONTAINER NEEDS THE HOST'S CA BUNDLE.
+        # An egress proxy that terminates TLS presents its own certificate, and
+        # these images are distroless: they ship a curated CA store that cannot
+        # know about a corporate proxy's CA. Without this, every registry and API
+        # call inside the container dies with
+        #   x509: certificate signed by unknown authority
+        # which docker-scout surfaces as "Log in with your Docker ID" -- an auth
+        # message for what is really a trust failure, and a genuinely misleading
+        # hour of debugging. Observed exactly that against a MITM dev proxy.
+        #
+        # Mounted ONLY when a proxy is actually configured, so the hardened
+        # image keeps its own trust store in the normal (GitHub-hosted, no
+        # proxy) case rather than silently inheriting the host's.
+        certs=()
+        if [[ -n "\${HTTPS_PROXY:-\${HTTP_PROXY:-\${https_proxy:-\${http_proxy:-}}}}" ]]; then
+          for bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+            if [[ -r "\$bundle" ]]; then
+              certs=(-v "\$bundle:/etc/ssl/certs/ca-certificates.crt:ro")
+              break
+            fi
+          done
+        fi
         exec docker run --rm \${interactive[@]+"\${interactive[@]}"} \\
           --user "\$(id -u):\$(id -g)" \\
           -e HOME="\$HOME" \\
          ${env_flags} \\
+          \${certs[@]+"\${certs[@]}"} \\
           -v "\$HOME:\$HOME" \\
           -v "\$PWD:\$PWD" -w "\$PWD" \\
           "$image" "\$@"
