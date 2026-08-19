@@ -299,6 +299,27 @@ A clean scan is also cross-checked against an independent SBOM package count,
 because a clean scan of an empty inventory looks exactly like a clean scan of a
 real image.
 
+### Measured on a real image
+
+`nicksdemoorg/dhi-node:26-debian13`, linux/amd64, 21 packages:
+
+```
+docker-scout cves, vendor VEX applied      0C 0H 0M 0L   exit 0   gate passes
+docker-scout cves, --vex-author rejected   0C 0H 0M 8L   exit 2   8 suppressed by VEX
+docker-scout policy --policy-dir policy    0 deviations  exit 0   "Image must be a DHI"
+  ...the same policy on alpine:3.20        1 violation   exit 2   marker <absent>
+```
+
+**VEX is doing real work, and `--vex-author` genuinely rejects it** — 8 findings
+appear when the vendor's statements are refused and vanish when they are applied, so
+the `skip-vex` negative test is really negative.
+
+**But all 8 are LOW.** At the default `SCAN_SEVERITY=HIGH,CRITICAL` this tag gives
+`skip-vex` nothing to block on, so `make demo-fail` will *pass*. Set the
+`SCAN_SEVERITY` repo variable to `LOW,MEDIUM,HIGH,CRITICAL` to see the refusal.
+Severities are scanner-specific — the same CVEs were HIGH/CRITICAL under Trivy,
+which is why the historical 12-finding baseline above differs from 8.
+
 ⚠️ **New egress dependency.** Scout's CVE matching is **server-side**: there is
 no local vulnerability database and no offline mode. The gate needs
 `api.dso.docker.com` reachable, and DHI VEX comes from
