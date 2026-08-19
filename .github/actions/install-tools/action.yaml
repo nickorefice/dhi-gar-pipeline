@@ -1,24 +1,26 @@
 name: Install pipeline tools
 description: >-
-  Install the pinned toolchain. regctl, trivy, and cosign run FROM THE ORG'S
-  MIRRORED DHI IMAGES (docker.io/<org>/dhi-regctl, dhi-trivy, dhi-cosign),
-  not GitHub release binaries: the pipeline's own tools get the same
-  provenance, SBOM, and signed-attestation story as the images they gate, and
-  a -fips variant is one input override away. A thin /usr/local/bin/<tool>
-  wrapper docker-runs each image, so every call site (the pipeline library,
-  the stage actions) is unchanged. docker scout (a CLI plugin, needs the
-  docker CLI) and regsync (no DHI image exists) still come from upstream
-  release binaries, pinned here as input defaults. Selection via the `tools`
-  input keeps the scheduled poll cheap: its plan job needs only regctl.
-  (Locally, `make tools` installs via Homebrew on macOS.)
+  Install the pinned toolchain. regctl, docker-scout, cosign, and opa run FROM
+  THE ORG'S MIRRORED DHI IMAGES (docker.io/<org>/dhi-regctl, dhi-scout-cli,
+  dhi-cosign, dhi-open-policy-agent), not GitHub release binaries: the pipeline's
+  own tools get the same provenance, SBOM, and signed-attestation story as the
+  images they gate, and a -fips variant is one input override away. A thin
+  /usr/local/bin/<tool> wrapper docker-runs each image, so every call site (the
+  pipeline library, the stage actions) is unchanged. Only regsync still comes
+  from an upstream release binary -- no DHI image exists for it (verified: 404
+  at dhi.io/regsync). Selection via the `tools` input keeps the scheduled poll
+  cheap: its plan job needs only regctl. (Locally, `make tools` installs via
+  Homebrew on macOS.)
 inputs:
   tools:
     description: >-
-      Space-separated subset of "regctl trivy cosign regsync scout".
+      Space-separated subset of "regctl scout cosign opa regsync".
       The default is what the sync job needs; the poll path passes just
-      "regctl".
+      "regctl". `opa` is for the offline policy tests (tests/test-policy.sh) --
+      the scan gate does NOT need it, because `docker-scout policy` embeds OPA
+      and evaluates the Rego in-process.
     required: false
-    default: regctl trivy scout
+    default: regctl scout
   regctl-image:
     description: >-
       Image for the regctl wrapper. Empty derives
@@ -26,10 +28,10 @@ inputs:
       Override to pin a variant (e.g. ...:0.11.5-fips) or a digest.
     required: false
     default: ""
-  trivy-image:
+  scout-image:
     description: >-
-      Image for the trivy wrapper. Empty derives
-      docker.io/$DOCKERHUB_ORG/dhi-trivy:0.73.0.
+      Image for the docker-scout wrapper. Empty derives
+      docker.io/$DOCKERHUB_ORG/dhi-scout-cli:1.23.1.
     required: false
     default: ""
   cosign-image:
@@ -38,14 +40,16 @@ inputs:
       docker.io/$DOCKERHUB_ORG/dhi-cosign:3.1.3.
     required: false
     default: ""
+  opa-image:
+    description: >-
+      Image for the opa wrapper. Empty derives
+      docker.io/$DOCKERHUB_ORG/dhi-open-policy-agent:1.19.1.
+    required: false
+    default: ""
   regclient-version:
     description: regclient release, used for the regsync binary only (regctl comes from the DHI image)
     required: false
     default: v0.11.5
-  scout-version:
-    description: docker scout CLI plugin release (no leading v)
-    required: false
-    default: 1.24.0
 runs:
   using: composite
   steps:
@@ -53,10 +57,10 @@ runs:
       env:
         TOOLS: ${{ inputs.tools }}
         REGCTL_IMAGE: ${{ inputs.regctl-image }}
-        TRIVY_IMAGE: ${{ inputs.trivy-image }}
+        SCOUT_IMAGE: ${{ inputs.scout-image }}
         COSIGN_IMAGE: ${{ inputs.cosign-image }}
+        OPA_IMAGE: ${{ inputs.opa-image }}
         REGCLIENT_VERSION: ${{ inputs.regclient-version }}
-        SCOUT_VERSION: ${{ inputs.scout-version }}
       run: |
         set -euo pipefail
 
@@ -82,15 +86,23 @@ runs:
         }
 
         # -------------------------------------------------------------------
-        # DHI-image tools: regctl, trivy, cosign, behind transparent wrappers.
+        # DHI-image tools: regctl, docker-scout, cosign, opa, behind
+        # transparent wrappers.
         #
         # Each wrapper runs the container as the host user with the host HOME
         # and working directory mounted at their own paths, so credential
-        # stores (~/.regctl, ~/.docker), trivy's DB cache (~/.cache/trivy),
-        # and every --output/--vex file under the workspace behave exactly as
-        # a host binary would. TRIVY_* env is forwarded when set --
-        # TRIVY_DB_REPOSITORY pins the DB registry and TRIVY_USERNAME/
-        # TRIVY_PASSWORD are the library's fallback credentials.
+        # stores (~/.regctl, ~/.docker), caches, and every --output /
+        # --result-file / --policy-dir path under the workspace behave exactly
+        # as a host binary would. Per-tool env is forwarded via the third
+        # argument -- docker-scout in particular needs the proxy variables,
+        # because its CVE matching is a live call to api.dso.docker.com and a
+        # proxy-less container in a restricted-egress environment fails there
+        # rather than anywhere obvious.
+        #
+        # Registry auth is NOT passed as env: the library's login_dockerhub /
+        # login_gar run `docker login`, which writes ~/.docker/config.json, and
+        # that file is visible to the container because HOME is mounted. That
+        # is the documented way docker-scout picks up credentials.
         #
         # stdin is attached (-i) ONLY when the arguments say the tool will
         # read it (--pass-stdin). `docker run -i` consumes the caller's stdin
@@ -105,8 +117,11 @@ runs:
         # would change supply chains without changing any visible outcome. A
         # broken mirror should stop the run and say so.
         # -------------------------------------------------------------------
-        install_dhi_wrapper() { # install_dhi_wrapper <name> <image>
-          local name="$1" image="$2"
+        install_dhi_wrapper() { # install_dhi_wrapper <name> <image> [env-vars...]
+          local name="$1" image="$2"; shift 2
+          local e env_flags=""
+          for e in "$@"; do env_flags+=" -e $e"; done
+
           docker pull -q "$image" >/dev/null \
             || { echo "::error title=dhi-$name pull failed::cannot pull $image -- confirm the workflow ran docker/login-action first, the org mirrors dhi/$name, and the PAT can read it. Deliberately NOT falling back to a GitHub release binary." >&2; exit 1; }
           cat >"$TMP/$name" <<EOF
@@ -124,7 +139,7 @@ runs:
         exec docker run --rm \${interactive[@]+"\${interactive[@]}"} \\
           --user "\$(id -u):\$(id -g)" \\
           -e HOME="\$HOME" \\
-          -e TRIVY_DB_REPOSITORY -e TRIVY_USERNAME -e TRIVY_PASSWORD \\
+         ${env_flags} \\
           -v "\$HOME:\$HOME" \\
           -v "\$PWD:\$PWD" -w "\$PWD" \\
           "$image" "\$@"
@@ -133,15 +148,22 @@ runs:
           log "$name via DHI image: $image"
         }
 
-        if want regctl || want trivy || want cosign; then
+        if want regctl || want scout || want cosign || want opa; then
           # Mirrored DHI repos are private. The calling workflow authenticates
           # docker natively with docker/login-action BEFORE this action runs
           # (see sync-dhi.yaml / inspect-referrers.yaml); an unauthenticated
           # pull fails below with an error that says exactly that.
           MIRROR="docker.io/${DOCKERHUB_ORG:-nicksdemoorg}"
           want regctl && install_dhi_wrapper regctl "${REGCTL_IMAGE:-$MIRROR/dhi-regctl:0.11.5}"
-          want trivy  && install_dhi_wrapper trivy  "${TRIVY_IMAGE:-$MIRROR/dhi-trivy:0.73.0}"
+          # docker-scout, not "scout": the DHI image's entrypoint is the
+          # /docker-scout binary, which is the same binary Docker ships as a
+          # CLI plugin. It is installed as a standalone command rather than
+          # into ~/.docker/cli-plugins, so call sites invoke `docker-scout ...`
+          # and never `docker scout ...` -- there is no plugin here to find.
+          want scout  && install_dhi_wrapper docker-scout "${SCOUT_IMAGE:-$MIRROR/dhi-scout-cli:1.23.1}" \
+                           DOCKER_CONFIG HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
           want cosign && install_dhi_wrapper cosign "${COSIGN_IMAGE:-$MIRROR/dhi-cosign:3.1.3}"
+          want opa    && install_dhi_wrapper opa "${OPA_IMAGE:-$MIRROR/dhi-open-policy-agent:1.19.1}"
         fi
 
         if want regsync; then
@@ -151,27 +173,17 @@ runs:
           chmod +x regsync; install_bin regsync regsync
         fi
 
-        if want scout; then
-          log "docker scout $SCOUT_VERSION (CLI plugin)"
-          curl -fsSL -o scout.tgz \
-            "https://github.com/docker/scout-cli/releases/download/v${SCOUT_VERSION}/docker-scout_${SCOUT_VERSION}_linux_${ARCH_GO}.tar.gz"
-          tar xzf scout.tgz docker-scout
-          mkdir -p "$HOME/.docker/cli-plugins"
-          install -m 0755 docker-scout "$HOME/.docker/cli-plugins/docker-scout"
-          log "installed docker-scout -> $HOME/.docker/cli-plugins/docker-scout"
-        fi
-
         # Print what actually landed, so a version drift is visible in the log
         # rather than only in a scanner's changed verdict.
         for t in $TOOLS; do
           case "$t" in
             regctl|regsync)
-              printf '%-8s %s\n' "$t" "$("$t" version 2>/dev/null | awk '/VCSTag/{print $2}')" ;;
-            trivy)
-              printf '%-8s %s\n' trivy "$(trivy --version 2>/dev/null | head -1 | awk '{print $2}')" ;;
+              printf '%-14s %s\n' "$t" "$("$t" version 2>/dev/null | awk '/VCSTag/{print $2}')" ;;
             cosign)
-              printf '%-8s %s\n' cosign "$(cosign version 2>/dev/null | awk '/GitVersion:/{print $2}')" ;;
+              printf '%-14s %s\n' cosign "$(cosign version 2>/dev/null | awk '/GitVersion:/{print $2}')" ;;
             scout)
-              printf '%-8s %s\n' scout "$(docker scout version 2>/dev/null | awk '/version:/{print $2; exit}')" ;;
+              printf '%-14s %s\n' docker-scout "$(docker-scout version 2>/dev/null | awk '/^version:/{print $2; exit}')" ;;
+            opa)
+              printf '%-14s %s\n' opa "$(opa version 2>/dev/null | awk '/^Version:/{print $2}')" ;;
           esac
         done

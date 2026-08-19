@@ -49,11 +49,13 @@ config: ## Create config.env from the example
 tools: ## Install the local toolchain (macOS/Homebrew; CI installs via .github/actions/install-tools)
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 	  command -v brew >/dev/null 2>&1 || { echo "Homebrew required on macOS: https://brew.sh"; exit 1; }; \
-	  brew install regclient trivy cosign jq gh || true; \
+	  brew install regclient cosign jq gh opa || true; \
 	  brew install --cask google-cloud-sdk || true; \
 	  brew tap hashicorp/tap || true; \
 	  brew install hashicorp/tap/terraform || true; \
-	  echo "docker scout ships with Docker Desktop; 'docker scout version' should already work"; \
+	  echo "docker scout ships with Docker Desktop. The pipeline calls it as 'docker-scout'"; \
+	  echo "(CI installs a wrapper around the dhi-scout-cli image); for local parity run:"; \
+	  echo "  ln -sf ~/.docker/cli-plugins/docker-scout /usr/local/bin/docker-scout"; \
 	else \
 	  echo "CI installs pinned release binaries via .github/actions/install-tools."; \
 	  echo "For local Linux test runs only regctl and jq are needed -- install from"; \
@@ -64,9 +66,9 @@ tools: ## Install the local toolchain (macOS/Homebrew; CI installs via .github/a
 versions: ## Print installed tool versions
 	@printf '%-14s %s\n' regctl   "$$(regctl version 2>/dev/null | awk '/VCSTag/{print $$2}' || echo MISSING)"
 	@printf '%-14s %s\n' regsync  "$$(regsync version 2>/dev/null | awk '/VCSTag/{print $$2}' || echo MISSING)"
-	@printf '%-14s %s\n' trivy    "$$(trivy --version 2>/dev/null | head -1 | awk '{print $$2}' || echo MISSING)"
 	@printf '%-14s %s\n' cosign   "$$(cosign version 2>/dev/null | awk '/GitVersion:/{print $$2}' || echo MISSING)"
-	@printf '%-14s %s\n' scout    "$$(docker scout version 2>/dev/null | awk '/version:/{print $$2; exit}' || echo MISSING)"
+	@printf '%-14s %s\n' scout    "$$(docker-scout version 2>/dev/null | awk '/version:/{print $$2; exit}' || docker scout version 2>/dev/null | awk '/version:/{print $$2; exit}' || echo MISSING)"
+	@printf '%-14s %s\n' opa      "$$(opa version 2>/dev/null | awk '/^Version:/{print $$2}' || echo MISSING)"
 	@printf '%-14s %s\n' gcloud   "$$(gcloud version 2>/dev/null | awk '/Google Cloud SDK/{print $$4}' || echo MISSING)"
 	@printf '%-14s %s\n' terraform "$$(terraform version -json 2>/dev/null | jq -r .terraform_version || echo MISSING)"
 	@printf '%-14s %s\n' jq       "$$(jq --version 2>/dev/null || echo MISSING)"
@@ -79,7 +81,9 @@ test: ## Run offline tests (they source the library extracted from the action YA
 	@echo
 	@./tests/test-gate-safety.sh
 	@echo
-	@./tests/test-vex-normalize.sh
+	@./tests/test-policy.sh
+	@echo
+	@./tests/test-scan-gate.sh
 	@echo
 	@./tests/test-expand-config.sh
 	@echo
