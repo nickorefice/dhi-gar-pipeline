@@ -185,6 +185,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PAT }}
 
+      # docker-scout and opa come from dhi.io rather than the org mirror (see
+      # install-tools). That registry issues tokens through registry.docker.io,
+      # so the same Hub credential authenticates it -- and authenticating is not
+      # optional in practice: an anonymous pull is subject to Docker Hub's
+      # anonymous rate limit, which GitHub-hosted runners share an egress IP for
+      # and routinely exhaust. An unauthenticated dhi.io pull failed on a real
+      # run here while succeeding from a developer machine, which is exactly the
+      # shape a rate limit takes.
+      - name: Login to dhi.io (docker-scout image; avoids anonymous rate limits)
+        uses: docker/login-action@v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
       - name: Install pinned toolchain
         uses: ./.github/actions/install-tools
         with:

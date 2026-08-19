@@ -130,8 +130,18 @@ runs:
           local e env_flags=""
           for e in "$@"; do env_flags+=" -e $e"; done
 
-          docker pull -q "$image" >/dev/null \
-            || { echo "::error title=dhi-$name pull failed::cannot pull $image -- confirm the workflow ran docker/login-action first, the org mirrors dhi/$name, and the PAT can read it. Deliberately NOT falling back to a GitHub release binary." >&2; exit 1; }
+          # Docker's own stderr goes into the annotation. Without it the error
+          # said only "cannot pull", which is indistinguishable between a
+          # missing tag, an unauthenticated repo, a rate limit, and DNS -- and
+          # that ambiguity cost a full debugging cycle on a real run, because
+          # workflow log downloads were unavailable and the annotation was the
+          # only thing legible. A pull failure should name its own cause.
+          local pull_log="$TMP/$name.pull.log"
+          if ! docker pull -q "$image" >"$pull_log" 2>&1; then
+            sed 's/^/    /' "$pull_log" >&2 || true
+            echo "::error title=dhi-$name pull failed::cannot pull $image -- $(tr '\n' ' ' <"$pull_log" | tail -c 400). Check: the workflow logged in to this registry, the repo/tag exists, and anonymous pull limits are not in play. Deliberately NOT falling back to a GitHub release binary." >&2
+            exit 1
+          fi
           cat >"$TMP/$name" <<EOF
         #!/usr/bin/env bash
         # $name -- runs the org's mirrored DHI image: $image
