@@ -161,53 +161,74 @@ cutover, which should broaden scanner ecosystem support for DHI's package
 metadata. Re-evaluate when that lands; the goal is to delete stage 30's scanner
 management, not to keep it forever.
 
-### [observed] Neither scanner applies DHI's VEX as shipped
+### [observed] Not every scanner applies DHI's VEX as shipped
 
-**This is the most consequential finding here.** Verify it in your own environment
-before trusting any VEX-aware gate, including this one.
+**This is the most consequential finding here, and it is why this pipeline gates
+on `docker-scout`.** Verify it in your own environment before trusting any
+VEX-aware gate, including this one.
 
-DHI identifies VEX products by Debian **source** package PURL. Trivy and Grype
-match on the **binary** package they discovered:
+DHI identifies VEX products primarily by Debian **source** package PURL, and only
+the source PURL carries a version and the `os_*` qualifiers. A scanner that
+matches on the **binary** package it discovered matches nothing:
 
 ```
 DHI VEX :  pkg:deb/debian/glibc@2.41-12+deb13u3+dhi1?os_distro=trixie&os_name=debian&os_version=13
-Trivy   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
-Grype   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6&upstream=glibc
+binary  :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
 ```
 
-Different package name (source vs binary) and different qualifiers. Measured on
-`dhi-node:26-debian13`:
+Different package name (source vs binary) and different qualifiers. Measured with
+Trivy on `dhi-node:26-debian13`: **12** findings with the VEX as shipped, **0**
+after remapping the identifiers. All 12 were CVEs Docker had already declared
+`not_affected`. The scan ran, `--vex` was passed, no error was raised, and
+**nothing was suppressed**. The failure mode is a missing effect, not a wrong
+number — `0 suppressed` reads identically whether VEX worked with nothing to do or
+was ignored entirely.
 
-| | Trivy (all severities) | Grype (HIGH/CRIT) |
-|---|---|---|
-| VEX as shipped | 12 findings | 6, `ignoredMatches: 0` |
-| VEX normalised | **0** | **0** |
+**How this pipeline resolves it now.** `docker-scout` carries both identifiers:
+its SBOM emits the Debian source package as its own artifact *and* each binary
+package with a `parent` pointer back to it, so the source PURL the VEX names is
+already present and no remapping is required. Scout also fetches the VEX
+attestation from the registry itself, so there is no `--vex-location` to wire up
+and no VEX Hub to sync. The pipeline previously carried
+`scripts/lib/vex-normalize.jq` to bridge this gap for Trivy; that file has been
+deleted along with the Trivy gate.
 
-All 12 were CVEs Docker had already declared `not_affected`. The scan ran, `--vex`
-was passed, no error was raised, and **nothing was suppressed**. The failure mode
-is a missing effect, not a wrong number — `0 suppressed` reads identically whether
-VEX worked with nothing to do or was ignored entirely.
-
-**Mitigation** (implemented in `scripts/lib/vex-normalize.jq`): remap each
-statement's products to the scanner's own identifiers, using the source → binary
-mapping in Trivy's `--list-all-pkgs` inventory (`SrcName`). Statuses and
-justifications are copied verbatim; a statement whose version does not match an
-installed package is reported unmatched and not applied.
+If you gate on a different scanner, the remapping problem is yours again — the
+deleted normaliser is in this repo's git history.
 
 **What to check before adopting any scanner as your gate:**
 
 1. Scan a DHI image with and without its VEX. If the counts are identical and
-   there were findings to suppress, the VEX is not being applied.
-2. Check whether the scanner exposes the source → binary mapping at all (Trivy:
-   `SrcName` via `--list-all-pkgs`; Grype: `artifact.upstreams`). Without it, no
-   remapping is possible.
-3. Re-test after any scanner upgrade. This is version-specific behaviour, and a
-   scanner that starts honouring source PURLs makes the remapping redundant —
-   harmless, since it is additive, but worth removing.
+   there were findings to suppress, the VEX is not being applied. This pipeline
+   does exactly that on every run (a baseline pass with VEX rejected) and warns
+   when the two counts match while findings remain.
+2. Check whether the scanner links binary packages to their source at all
+   (`docker-scout`: a `parent` PURL per artifact; Trivy: `SrcName` via
+   `--list-all-pkgs`; Grype: `artifact.upstreams`). Without it, no remapping is
+   possible.
+3. Re-test after any scanner upgrade — this is version-specific behaviour. Stage
+   30 records how many SBOM artifacts carry a `parent` link precisely so a
+   regression here shows up as a count, not as VEX silently ceasing to suppress.
 
-Also note the two scanners assign **different severities** to the same CVE:
+Also note that scanners assign **different severities** to the same CVE:
 `CVE-2026-5435` is MEDIUM to Trivy and HIGH to Grype. A severity-threshold gate is
-therefore scanner-specific, which is a second reason Grype is report-only here.
+therefore scanner-specific — changing scanners changes which images pass, even
+with an identical `SCAN_SEVERITY`.
+
+### [trade-off] The scan gate now depends on a network service
+
+`docker-scout`'s CVE matching is **server-side**. There is no local vulnerability
+database and no offline mode, so stage 30 requires outbound access to
+`api.dso.docker.com` (CVE matching) and `registry.scout.docker.com` (DHI VEX and
+SBOM attestations). Both must be on any egress allowlist.
+
+If you are in an air-gapped or strictly-allowlisted environment, this is the one
+finding here most likely to change your design: a scanner with a local DB (Trivy,
+Grype) keeps the gate self-contained at the cost of owning the VEX remapping
+yourself. The pipeline fails closed either way — a scanner it cannot reach blocks
+promotion rather than passing it — but "blocked" and "unavailable" become the same
+outcome, so plan for scanner availability the way you would plan for registry
+availability.
 
 ### [observed] VEX is not present on every DHI tag
 
@@ -251,8 +272,11 @@ attestations. The verify gate queries both subjects and merges.
 application/vnd.in-toto+json`.** Nothing is distinguishable by `artifactType`; the
 document type appears only in the `in-toto.io/predicate-type` annotation, and the
 payload is an in-toto Statement wrapping the real document. A scanner handed the
-Statement wrapper applies no VEX and reports success. Stage 30 unwraps
-`.predicate` before passing VEX to Trivy.
+Statement wrapper applies no VEX and reports success. `docker-scout` reads the
+attestation itself and handles the wrapper, so nothing has to unwrap it to make
+the gate work; stage 30 still unwraps `.predicate` when it reads the VEX documents
+for their justifications, which is presentation only and never changes a verdict.
+If you hand VEX to a scanner as a *file*, unwrapping is on you.
 
 ---
 

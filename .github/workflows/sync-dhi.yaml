@@ -157,12 +157,11 @@ jobs:
       # "unauthorized" that reads like a permissions problem.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_PAT: ${{ secrets.DOCKERHUB_PAT }}
-      TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2
 
     steps:
       - uses: actions/checkout@v4
 
-      # regctl and trivy run from the org's mirrored DHI images behind
+      # regctl and docker-scout run from the org's mirrored DHI images behind
       # transparent wrappers -- the tools that gate the images carry the same
       # provenance story as the images they gate. The mirrors are private, so
       # docker authenticates first (natively, not via shell). Version pins
@@ -177,7 +176,7 @@ jobs:
       - name: Install pinned toolchain
         uses: ./.github/actions/install-tools
         with:
-          tools: regctl trivy scout
+          tools: regctl scout
 
       # GCP auth via Workload Identity Federation. No service-account key.
       # gcloud is included for the evidence-export stage.
@@ -211,7 +210,7 @@ jobs:
           tag: ${{ matrix.tag }}
           require-vex: ${{ matrix.requireVex }}
 
-      - name: 30 Scan gate (Trivy with VEX)
+      - name: 30 Scan gate (docker-scout CVEs with VEX + Rego policy)
         uses: ./.github/actions/scan
         with:
           repo: ${{ matrix.repo }}
@@ -249,7 +248,9 @@ jobs:
             out/**/run-manifest.json
             out/**/verify-report*.json
             out/**/scan-report.json
-            out/**/trivy-report*.json
+            out/**/scout-cves*.sarif.json
+            out/**/scout-sbom.json
+            out/**/policy-result.json
             out/**/scout-compare.txt
             out/**/inventory-*.json
             out/**/evidence/manifest.json
@@ -277,8 +278,11 @@ jobs:
               echo
               missing="$(jq -r '.gates.verify.groupsMissing // [] | join(", ")' "$m")"
               [[ -n "$missing" ]] && echo "Missing attestation groups: **$missing**"
-              gating="$(jq -r '.gates.scan.trivy.gatingFindings // "n/a"' "$m")"
+              gating="$(jq -r '.gates.scan.cves.gatingFindings // "n/a"' "$m")"
               echo "Un-VEXed HIGH/CRITICAL: **$gating**"
+              rego="$(jq -r '.gates.scan.rego.status // "n/a"' "$m")"
+              regoviol="$(jq -r '.gates.scan.rego.violations // 0' "$m")"
+              echo "Rego policy: **$rego** ($regoviol violation(s))"
             else
               echo "No run manifest was produced -- the failure occurred during resolve."
             fi

@@ -206,12 +206,12 @@ runs:
         # -------------------------------------------------------------------
         # 5. Docker Scout cross-check (informational)
         # -------------------------------------------------------------------
-        step "5. docker scout attest list (cross-check)"
-        if docker scout version >/dev/null 2>&1; then
-          docker scout attest list --platform "$VERIFY_PLATFORM" "registry://${HUB_REF#docker.io/}" 2>&1 \
-            | sed 's/^/    /' >&2 || warn "docker scout attest list failed -- informational only, not a gate"
+        step "5. docker-scout attest list (cross-check)"
+        if command -v docker-scout >/dev/null 2>&1; then
+          docker-scout attest list --platform "$VERIFY_PLATFORM" "registry://${HUB_REF#docker.io/}" 2>&1 \
+            | sed 's/^/    /' >&2 || warn "docker-scout attest list failed -- informational only, not a gate"
         else
-          warn "docker scout not installed -- skipping cross-check"
+          warn "docker-scout not installed -- skipping cross-check"
         fi
 
         step "Done"

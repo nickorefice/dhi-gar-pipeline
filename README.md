@@ -47,7 +47,8 @@ Docker Hub  nicksdemoorg/dhi-node:TAG        registry.scout.docker.com/nicksdemo
                          │
                 ┌────────┴────────┐
                 │  20 verify gate │  attestations present? digest unchanged?
-                │  30 scan gate   │  Trivy + DHI VEX; scout compare
+                │  30 scan gate   │  docker-scout CVEs + DHI VEX; Rego policy;
+                │                 │  scout compare
                 └────────┬────────┘
                          │  both green (and only then)
                          ▼
@@ -74,29 +75,51 @@ plumbing every stage shares — config, auth, run manifest, the gate lifecycle,
 and the verify / check-current / gate-check bodies — is the library embedded
 in `.github/actions/pipeline-env/action.yaml`. The offline tests extract and
 source that same library text (`tests/extract-pipeline-lib.sh`), so what is
-tested is what runs. Only the jq programs (`scripts/lib/*.jq`) and
-`attestation-types.json` remain on disk as shared data files.
+tested is what runs. Only the jq programs (`scripts/lib/*.jq`), the Rego
+policies (`policy/*.rego`), and `attestation-types.json` remain on disk as
+shared data files.
 
 **The pipeline's own tools run from Docker Hardened Images.** CI does not
-download regctl, trivy, or cosign release binaries: the install-tools action
-pulls the org's mirrored `dhi-regctl:0.11.5`, `dhi-trivy:0.73.0`, and
-`dhi-cosign:3.1.3` and installs transparent `/usr/local/bin/<tool>` wrappers
-that `docker run` them. The tools that gate the images carry the same signed
-provenance, SBOM, and VEX story as the images they gate — and swapping any
-of them to the FIPS build is one input override (e.g.
-`trivy-image: ...:0.73.0-fips`). If a mirror cannot be pulled the install
-fails loudly; it deliberately does **not** fall back to a GitHub release
-binary, because silently changing supply chains is the exact class of
-failure this pipeline exists to prevent. (docker scout remains a release
-binary — it is a CLI plugin — and Trivy is the sole scanner: the Grype
-second opinion was removed with it.)
+download regctl, docker-scout, cosign, or opa release binaries: the install-tools
+action pulls DHI images and installs transparent `/usr/local/bin/<tool>` wrappers
+that `docker run` them, so the tools that gate the images carry the same signed
+provenance, SBOM, and VEX story as the images they gate. Swapping any of them to
+the FIPS build is one input override (e.g. `scout-image: ...:1.23.1-fips`).
+
+Two sources, deliberately named per tool rather than chained as a fallback:
+
+| Tool | Image | Source |
+|---|---|---|
+| `regctl` | `dhi-regctl:0.11.5` | org mirror |
+| `cosign` | `dhi-cosign:3.1.3` | org mirror |
+| `docker-scout` | `dhi.io/scout-cli:1.23.1` | Docker's DHI registry |
+| `opa` | `dhi.io/open-policy-agent:1.19.1` | Docker's DHI registry |
+| `regsync` | upstream release binary | no DHI image exists (`dhi.io/regsync` 404s) |
+
+The last two come from `dhi.io` because **the org does not mirror them** —
+verified against the live registry, where `<org>/dhi-regctl` lists 72 tags while
+`<org>/dhi-scout-cli` and `<org>/dhi-open-policy-agent` do not exist. They are
+still DHI images with the same attestations, published with
+`com.docker.dhi.entitlement=public`. To move them onto the mirror, run
+`docker dhi mirror start scout-cli` (and `open-policy-agent`) for the org, then
+pass `scout-image` / `opa-image`.
+
+If an image cannot be pulled the install fails loudly. It deliberately does
+**not** fall back — not to a GitHub release binary, and not from the mirror to
+`dhi.io` — because silently changing supply chains is the exact class of failure
+this pipeline exists to prevent.
+
+`docker-scout`, not `docker scout`: the DHI image's entrypoint is the
+`/docker-scout` binary, so it is installed as a standalone command rather than
+into `~/.docker/cli-plugins`. There is no plugin to find, and every call site
+invokes it by that name.
 
 | Stage | Action | Does |
 |---|---|---|
 | 00 | `.github/actions/resolve` | Resolve tag → digest **once**; write the run manifest |
 | 10 | `.github/actions/sync` | Copy image + referrers → `dhi-quarantine` |
 | 20 | `.github/actions/verify` | **Gate:** attestations survived, digest unchanged |
-| 30 | `.github/actions/scan` | **Gate:** Trivy w/ VEX, `scout compare` |
+| 30 | `.github/actions/scan` | **Gate:** `docker-scout cves` w/ VEX **and** `policy/*.rego`; `scout compare` |
 | 40 | `.github/actions/promote` | Copy `dhi-quarantine` → `dhi-prod` |
 | 50 | `.github/actions/export-evidence` | Write evidence bundle to GCS |
 | — | `.github/actions/inspect-referrers` | Diagnostic: where are the attestations, really? (`inspect-referrers.yaml` workflow) |
@@ -146,8 +169,13 @@ Breaking any of these invalidates the attestations, which defeats the point.
 4. **No long-lived GCP credentials.** CI federates via GitHub OIDC; no
    service-account key exists to leak.
 5. **Promotion requires both gates green**, verified against the digest being
-   promoted. A failed gate leaves the image in quarantine and still writes
-   evidence.
+   promoted — and stage 30 is itself two independent refusals (vulnerabilities
+   and Rego policy), either of which blocks. A failed gate leaves the image in
+   quarantine and still writes evidence.
+6. **A gate that could not run has approved nothing.** Undocumented scanner exit
+   codes, an unobtainable SBOM, and a crashed stage are all recorded as `error`,
+   never as a pass. "The scanner broke" and "the image is clean" must never be
+   the same outcome.
 
 ## What running this against real DHI taught us
 
@@ -174,64 +202,109 @@ holds `{scanner, metadata}`; `scout/vulnerabilities/v0.1` holds a findings list
 with no status or justification fields. Deriving VEX from them would invent
 assessments the vendor never made.
 
-**Scanners do not apply DHI's VEX as shipped — this one is load-bearing.** DHI
-identifies VEX products by Debian **source** package PURL; Trivy and Grype match
-the **binary** package they found:
+**Not every scanner applies DHI's VEX — and the failure is silent. This is why
+the scanner choice is load-bearing.** DHI identifies VEX products primarily by
+Debian **source** package PURL, and only the source PURL carries a version and
+the `os_*` qualifiers. A scanner that matches on the **binary** package it found
+therefore matches nothing:
 
 ```
 DHI VEX :  pkg:deb/debian/glibc@2.41-12+deb13u3+dhi1?os_distro=trixie&os_name=debian&os_version=13
-Trivy   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
-Grype   :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6&upstream=glibc
+binary  :  pkg:deb/debian/libc6@2.41-12+deb13u3+dhi1?arch=amd64&distro=debian-13.6
 ```
 
-Measured on `dhi-node:26-debian13`:
+Measured with Trivy on `dhi-node:26-debian13`: **12** findings with the VEX as
+shipped, **0** after remapping the identifiers. Every one of those 12 was a CVE
+Docker had already declared `not_affected`. The scan ran, `--vex` was passed, no
+error appeared, and **nothing was suppressed** — the failure mode is a missing
+*effect*, not a wrong number, which is the hardest kind to notice.
 
-| | Trivy findings | Grype HIGH/CRIT |
-|---|---|---|
-| VEX as shipped | **12** | **6** (`ignoredMatches: 0`) |
-| VEX normalised | **0** | **0** |
+**`docker-scout` does not have this problem, which is why it is the scan gate.**
+Its SBOM emits the source package as its own artifact *and* each binary package
+carrying a `parent` pointer back to it:
 
-Every one of those 12 was a CVE Docker had already declared `not_affected`. The
-scan ran, `--vex` was passed, no error appeared, and **nothing was suppressed** —
-the failure mode is a missing *effect*, not a wrong number. The scan stage
-therefore normalises VEX product identifiers before scanning (see [Making
-scanners actually ingest the VEX](#making-scanners-actually-ingest-the-vex)),
-and warns loudly if VEX suppresses nothing while findings remain.
+```
+{"name":"glibc","purl":"pkg:deb/debian/glibc@2.41-12+deb13u3?os_distro=trixie&os_name=debian&os_version=13"}
+{"name":"libc6","purl":"pkg:deb/debian/libc6@...","parent":"pkg:deb/debian/glibc@2.41-12+deb13u3?os_distro=..."}
+```
+
+That source PURL is the same shape as the VEX product identifier, so both sides
+of the match already exist and no remapping step is needed. Scout also reads the
+VEX attestation off the registry itself — no `--vex-location`, no VEX Hub sync.
+The pipeline previously carried `scripts/lib/vex-normalize.jq` to bridge the gap
+for Trivy; **that file is deleted**, and the scan stage instead records how many
+SBOM artifacts carry a `parent` link, so a future Scout release that stopped
+emitting them would surface as a count dropping to zero rather than as VEX
+quietly ceasing to suppress.
+
+The gate still reports the contrast, computed by set difference between a pass
+with the vendor's VEX rejected and the real one, and still warns loudly if VEX
+suppresses nothing while findings remain.
 
 **GAR supports the OCI referrers API natively** — no `sha256-<digest>` fallback
 tags were created, so referrers round-trip through the real API.
 
-## Making scanners actually ingest the VEX
+## The scan gate: two refusals
 
-`scripts/lib/vex-normalize.jq` re-expresses each VEX statement in the package
-identifiers the scanner emits, using the source → binary mapping from Trivy's own
-`--list-all-pkgs` inventory (`SrcName`). On a real DHI image:
+Stage 30 blocks on either of two independent findings. Neither substitutes for
+the other: a clean CVE list on an image that is not a DHI is not a pass, and a
+genuine DHI carrying un-VEXed criticals is not either.
 
-```
-scanner package inventory: 15 package(s)
-vex.openvex.01.json: 14 statement(s) remapped, 0 unmatched
-    CVE-2010-0928:  openssl -> libssl3t64, openssl-provider-legacy
-    CVE-2026-5435:  glibc   -> libc6
-    CVE-2026-27171: zlib    -> zlib1g
-```
+**1. Vulnerabilities** — `docker-scout cves --only-severity <SCAN_SEVERITY>`
+against the digest, with the vendor's VEX applied automatically from the
+attestation.
 
-It handles one-source-to-many-binaries (`openssl` → 2 packages) and the epoch
-mismatch (VEX writes `1:` inline; the scanner PURL carries `?epoch=1`).
+**2. Policy** — [`policy/dhi-provenance.rego`](policy/dhi-provenance.rego),
+evaluated by the OPA embedded in `docker-scout`. It asserts the image really is a
+Docker Hardened Image, via the `com.docker.dhi.name` / `com.docker.dhi.distro`
+markers.
 
-**What it does not do.** Statuses, justifications and impact statements are copied
-verbatim; only product identifiers are *added*, originals retained. A statement
-whose version does not match an installed package is reported `unmatched` and
-**not** applied — guessing there would fabricate a vendor assessment, which is
-worse than applying no VEX. `tests/test-vex-normalize.sh` asserts all of this,
-including that no CVE is invented or dropped.
+That policy is deliberately **not** a base-image allowlist, and the reason is
+worth recording: **a DHI has no base image.** `dhi-node` is not built `FROM`
+anything — its history contains no rootfs import, and it is assembled from
+hardened `.deb` packages fetched from `dhi.io`. Its SLSA provenance lists exactly
+two container dependencies, `dhi/build` (the build toolchain) and
+`dhi/scout-sbom-indexer`, neither of which is a runtime base. So Scout's built-in
+`approved-base-images` policy reports *No data* on every tag this pipeline syncs,
+and a hand-written "some dependency starts with `dhi`" test would pass by
+matching the build toolchain — green for a reason unrelated to what it claims to
+check. `org.opencontainers.image.base.name` is no help either: BuildKit has never
+populated it ([moby/buildkit#2756](https://github.com/moby/buildkit/issues/2756)),
+and it is absent on every DHI image *and* on stock library images, so a gate
+reading it fails closed on 100% of legitimate traffic.
 
-With it in place, on `dhi-node:26-debian13` at all severities:
+The `com.docker.dhi.*` markers appear as both config labels and manifest
+annotations, and because annotations live inside the digest-covered manifest
+bytes, a digest-preserving copy provably cannot strip them. Note the marker value
+is `dhi/node` — with a **slash**. The mirror repository is `<org>/dhi-node` with a
+hyphen; gating on `dhi-` would reject every genuine DHI.
 
-```
-findings without VEX (baseline) : 12
-suppressed by vendor VEX        : 12     each with the vendor's justification
-findings gating the promotion   : 0
-```
+They are, however, vendor-asserted metadata rather than a cryptographic proof —
+anyone can label an image `com.docker.dhi.name=dhi/node`. The policy is a policy
+gate, not a trust root, which is why it runs *after* stage 20 establishes that the
+signed attestations are present and bound to this digest.
+
+**The verdict comes from the exit code, not from parsing a report** — the
+opposite of the Trivy implementation, and a deliberate inversion.
+`docker scout cves` has no `--format json`; its structured outputs are
+SARIF/GitLab/SPDX, whose population Docker does not document. Exit codes *are*
+specified, so they are the verdict — checked with a strict allowlist: **0 is the
+only pass**, 2 is findings, and anything else is a tooling failure that blocks.
+"Fail only on 2" would be a fail-open bug: `scout-cli#213` records a run that
+detected vulnerabilities and exited **255**. `tests/test-scan-gate.sh` asserts
+every one of those branches, including that a crashed gate leaves a non-passing
+status in the run manifest rather than a stale pass.
+
+A clean scan is also cross-checked against an independent SBOM package count,
+because a clean scan of an empty inventory looks exactly like a clean scan of a
+real image.
+
+⚠️ **New egress dependency.** Scout's CVE matching is **server-side**: there is
+no local vulnerability database and no offline mode. The gate needs
+`api.dso.docker.com` reachable, and DHI VEX comes from
+`registry.scout.docker.com`. Both must be on any egress allowlist. A Docker Scout
+outage now blocks promotion rather than passing it — the correct direction to
+fail, but a real availability trade the Trivy implementation did not carry.
 
 ## Prerequisites
 
@@ -240,9 +313,13 @@ make tools      # Homebrew on macOS, release binaries on Linux
 make versions
 ```
 
-`regctl`, `regsync`, `trivy`, `cosign`, `docker scout`, `gcloud`,
-`terraform`, `gh`, `jq`. (In CI, regctl / trivy / cosign run from the org's
-mirrored DHI images; `make tools` covers local use.)
+`regctl`, `regsync`, `cosign`, `docker scout`, `opa`, `gcloud`, `terraform`,
+`gh`, `jq`. (In CI, regctl / docker-scout / cosign / opa run from the org's
+mirrored DHI images; `make tools` covers local use.) `opa` is needed only by
+`tests/test-policy.sh`, which evaluates `policy/*.rego` offline — the scan gate
+itself does not need it, because `docker-scout policy` embeds OPA. Both that test
+and `tests/test-scan-gate.sh` skip cleanly when their tooling is absent, so
+`make test` never requires the network.
 
 ## Setup
 
@@ -410,15 +487,18 @@ make lint    # shellcheck: remaining scripts, tests, and every run block in the 
 The suites test the code CI actually runs: `tests/extract-pipeline-lib.sh`
 extracts the pipeline library out of
 `.github/actions/pipeline-env/action.yaml` and the tests source that text
-directly, so a change to the YAML is a change to what is under test. The jq
-programs (`scripts/lib/*.jq`) are tested as the files CI invokes.
+directly, so a change to the YAML is a change to what is under test.
+`test-scan-gate.sh` extracts stage 30's run block the same way. The jq programs
+(`scripts/lib/*.jq`) and the Rego policies (`policy/*.rego`) are tested as the
+files CI invokes.
 
 | Suite | Covers |
 |---|---|
 | `test-classify.sh` (26) | Attestation classification under both storage conventions, missing-VEX, zero-referrer, `REQUIRE_VEX` policy override |
 | `test-referrers-copy.sh` (13) | Real `regctl` copies between `ocidir://` layouts: the silent `--external` failure, naive-copy attestation loss, native referrers at the target, payload-level type resolution |
 | `test-gate-safety.sh` (12) | Every way a promotion must be refused — crashed gate, stale verdict, verdict recorded for a different digest, sync-config.yaml hold |
-| `test-vex-normalize.sh` (16) | Source→binary PURL remapping, one-to-many, epoch handling, version-mismatch refusal, and that no status/justification/CVE is ever altered |
+| `test-policy.sh` (15) | `policy/*.rego` evaluated offline by OPA: a genuine DHI passes from either marker carrier, every non-DHI shape is refused, an empty input fails closed, each failure reports exactly one violation, and `--policy-config` overrides actually take effect |
+| `test-scan-gate.sh` (30) | The scan gate's control flow, using the run block extracted from the action YAML against a stubbed `docker-scout`: the exit-code allowlist (0 pass / 2 findings / **anything else blocks**), that either half alone refuses, that a zero-package SBOM is not evidence, that `skip-vex` really inverts the verdict, and that no failure path leaves a passing verdict in the run manifest |
 | `test-expand-config.sh` (18) | sync-config.yaml expansion: requireVex/hold inheritance (including explicit tag-level `false` over image-level `true`), and that a config typo fails loudly rather than silently shrinking the allow list |
 | `test-relay.sh` (20) | Runs the real webhook relay on loopback: secret-path auth, payload validation, repo allow-list, tag filtering, dedupe, and fail-closed misconfiguration |
 

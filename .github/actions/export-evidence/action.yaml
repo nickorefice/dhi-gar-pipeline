@@ -149,7 +149,12 @@ runs:
         # 2. Gate reports, copied verbatim.
         # -------------------------------------------------------------------
         step "50b collect gate reports"
-        for r in verify-report.json verify-report-prod.json scan-report.json; do
+        # policy-result.json and the SARIF are the scan gate's raw outputs -- the
+        # Rego verdict with its violation objects, and the scanner's own finding
+        # list. An auditor asking "what exactly did the gate see" should not have
+        # to take scan-report.json's summary on trust.
+        for r in verify-report.json verify-report-prod.json scan-report.json \
+                 policy-result.json scout-cves.sarif.json scout-cves-baseline.sarif.json; do
           if [[ -f "$RUN_DIR/$r" ]]; then cp "$RUN_DIR/$r" "$BUNDLE/$r"; log "  $r"; fi
         done
         if [[ -f "$RUN_DIR/scout-compare.txt" ]]; then

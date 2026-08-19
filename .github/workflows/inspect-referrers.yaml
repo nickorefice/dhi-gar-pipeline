@@ -39,7 +39,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PAT }}
 
-      - name: Install regctl + docker scout
+      - name: Install regctl + docker-scout
         uses: ./.github/actions/install-tools
         with:
           tools: regctl scout

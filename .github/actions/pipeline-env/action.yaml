@@ -38,10 +38,16 @@ runs:
         # data files -- they are shared verbatim between CI and the offline tests.
         REPO_ROOT="${DHI_REPO_ROOT:-$PWD}"
         CLASSIFY_JQ="$REPO_ROOT/scripts/lib/classify.jq"
-        VEX_NORMALIZE_JQ="$REPO_ROOT/scripts/lib/vex-normalize.jq"
         EXPAND_CONFIG_JQ="$REPO_ROOT/scripts/lib/expand-config.jq"
         ATTESTATION_TYPES="$REPO_ROOT/attestation-types.json"
-        export REPO_ROOT CLASSIFY_JQ VEX_NORMALIZE_JQ EXPAND_CONFIG_JQ ATTESTATION_TYPES
+        # The Rego the scan gate evaluates via docker-scout's embedded OPA, and
+        # the optional per-policy config. Both stay on disk as data files, shared
+        # verbatim between CI and tests/test-policy.sh -- the same arrangement as
+        # the jq programs, and for the same reason: what is tested is what runs.
+        POLICY_DIR="$REPO_ROOT/policy"
+        POLICY_CONFIG="${POLICY_CONFIG:-$REPO_ROOT/policy-config.json}"
+        export REPO_ROOT CLASSIFY_JQ EXPAND_CONFIG_JQ ATTESTATION_TYPES \
+               POLICY_DIR POLICY_CONFIG
 
         # --------------------------------------------------------------------------
         # Logging
@@ -103,12 +109,14 @@ runs:
           : "${VERIFY_PLATFORM:=linux/amd64}"
           : "${SCAN_SEVERITY:=HIGH,CRITICAL}"
 
-          # Trivy's default DB source is mirror.gcr.io, with ghcr.io only as a fallback.
-          # Pinning ghcr.io keeps the scan gate to one registry host, which matters in any
-          # environment with an egress allowlist -- a scan that cannot fetch its database
-          # fails closed and looks like a tooling error, not a clean bill of health.
-          : "${TRIVY_DB_REPOSITORY:=ghcr.io/aquasecurity/trivy-db:2}"
-          export TRIVY_DB_REPOSITORY
+          # NOTE ON EGRESS. The scan gate is docker-scout, whose CVE matching is
+          # SERVER-SIDE: there is no local vulnerability database and no offline
+          # mode, so the gate needs outbound access to api.dso.docker.com, and
+          # DHI VEX attestations come from registry.scout.docker.com. Both must
+          # be on any egress allowlist. This is a real availability dependency
+          # the Trivy implementation did not have -- a scanner outage now blocks
+          # promotion. That is the correct direction to fail, but it is a
+          # deliberate trade, not an oversight.
           : "${REPO:=dhi-node}"
           : "${TAG:=24-alpine}"   # DHI publishes no "latest" tag
           : "${GITHUB_REPO:=dhi-gar-pipeline}"
@@ -166,14 +174,16 @@ runs:
         # TWO credential stores have to be populated, not one.
         #
         # `regctl registry login` writes to ~/.regctl/config.json. It does NOT write to
-        # ~/.docker/config.json. Trivy and `docker scout` read Docker's store. So a
-        # regctl-only login leaves those two unauthenticated, and the resulting failure
-        # looks like a registry permissions problem rather than a missing credential --
-        # verified by inspecting both files after a successful regctl login.
+        # ~/.docker/config.json. docker-scout reads Docker's store. So a regctl-only
+        # login leaves it unauthenticated, and the resulting failure looks like a
+        # registry permissions problem rather than a missing credential -- verified by
+        # inspecting both files after a successful regctl login.
         #
-        # `docker login` is therefore not redundant. Where the docker CLI is absent we
-        # carry on: regctl is what the copy and referrer operations actually need, and
-        # Trivy accepts credentials by environment variable as a fallback.
+        # `docker login` is therefore not redundant; it is the ONLY way docker-scout
+        # gets credentials here, since the install-tools wrapper runs it in a container
+        # with HOME mounted and passes no credential environment. Where the docker CLI
+        # is absent we carry on: regctl is what the copy and referrer operations
+        # actually need, and the scan gate will fail loudly rather than quietly.
         _login_both() { # _login_both <host> <user> <secret>
           local host="$1" user="$2" secret="$3"
 
@@ -182,8 +192,8 @@ runs:
 
           if command -v docker >/dev/null 2>&1; then
             if ! printf '%s' "$secret" | docker login "$host" -u "$user" --password-stdin >/dev/null 2>&1; then
-              warn "docker login failed for $host -- regctl is authenticated, but Trivy and"
-              warn "docker scout read Docker's credential store and may not authenticate"
+              warn "docker login failed for $host -- regctl is authenticated, but docker-scout"
+              warn "reads Docker's credential store and will not authenticate"
             fi
           else
             warn "docker CLI absent -- only regctl is authenticated for $host"
@@ -228,10 +238,6 @@ runs:
             _login_both "$host" "$DOCKERHUB_USERNAME" "$DOCKERHUB_PAT" \
               || die "login failed for $host -- for $SCOUT_REGISTRY confirm the PAT can read the org's Hardened Images"
           done
-
-          # Trivy's fallback path, so a scan still authenticates if Docker's store is
-          # unavailable (no docker CLI, or a credential helper we cannot write to).
-          export TRIVY_USERNAME="$DOCKERHUB_USERNAME" TRIVY_PASSWORD="$DOCKERHUB_PAT"
         }
 
         # GAR takes a short-lived OAuth token as the password, with the fixed username
@@ -252,8 +258,8 @@ runs:
           fi
           [[ -n "$token" ]] || die "GCP access token was empty"
 
-          # Both stores, for the same reason as login_dockerhub -- Trivy and docker scout
-          # read Docker's store, regctl reads its own.
+          # Both stores, for the same reason as login_dockerhub -- docker-scout reads
+          # Docker's store, regctl reads its own.
           _login_both "$GAR_HOST" oauth2accesstoken "$token" \
             || die "login failed for $GAR_HOST"
 
@@ -678,26 +684,30 @@ runs:
           fi
 
           # -------------------------------------------------------------------------
-          # Check 3 -- Docker Scout cross-check. INFORMATIONAL ONLY.
+          # Check 3 -- docker-scout cross-check. INFORMATIONAL ONLY.
           #
-          # Deliberately never fails the gate. Scout reading the attestations is a nice
-          # confirmation, but Scout not reading them out of GAR is a tooling/auth gap, not
-          # evidence about the image. regctl is the authority here; letting a second tool's
-          # auth quirks block a promotion would be the wrong dependency.
+          # Deliberately never fails THIS gate, even though docker-scout is the scan
+          # gate (stage 30) and therefore no longer an optional second opinion. The
+          # distinction is what each tool is being trusted for: regctl is the authority
+          # on whether the referrers are present and bound to this digest, and that is
+          # the whole question check 2 answers. Scout failing to READ them out of GAR is
+          # an auth or tooling gap in a different tool, not evidence about the image --
+          # so it is reported and moved past. If Scout is genuinely broken, stage 30
+          # refuses on its own, loudly, rather than being second-guessed here.
           # -------------------------------------------------------------------------
-          step "check 3: docker scout cross-check (informational)"
+          step "check 3: docker-scout cross-check (informational)"
           SCOUT_OUT="$RUN_DIR/scout-attest-list-${TARGET}.txt"
-          if docker scout version >/dev/null 2>&1; then
-            if docker scout attest list --platform "$VERIFY_PLATFORM" \
+          if command -v docker-scout >/dev/null 2>&1; then
+            if docker-scout attest list --platform "$VERIFY_PLATFORM" \
                  "registry://$QREPO@$LIVE_DIGEST" >"$SCOUT_OUT" 2>&1; then
               n_scout="$(grep -cE '^\s*(SBOM|Provenance|VEX|in-toto|https://)' "$SCOUT_OUT" 2>/dev/null || true)"
-              add_check scout-crosscheck pass "docker scout read attestations from $TARGET (${n_scout:-0} line(s) matched)" ""
+              add_check scout-crosscheck pass "docker-scout read attestations from $TARGET (${n_scout:-0} line(s) matched)" ""
             else
-              add_check scout-crosscheck warn "docker scout could not read attestations where regctl could" \
+              add_check scout-crosscheck warn "docker-scout could not read attestations where regctl could" \
                 "$(head -3 "$SCOUT_OUT" | tr '\n' ' ') -- tooling gap, not a gate failure"
             fi
           else
-            add_check scout-crosscheck warn "docker scout not installed" "skipped"
+            add_check scout-crosscheck warn "docker-scout not installed" "skipped"
           fi
 
           # -------------------------------------------------------------------------
