@@ -80,17 +80,34 @@ policies (`policy/*.rego`), and `attestation-types.json` remain on disk as
 shared data files.
 
 **The pipeline's own tools run from Docker Hardened Images.** CI does not
-download regctl, docker-scout, or cosign release binaries: the install-tools
-action pulls the org's mirrored `dhi-regctl:0.11.5`, `dhi-scout-cli:1.23.1`,
-`dhi-cosign:3.1.3`, and `dhi-open-policy-agent:1.19.1` and installs transparent
-`/usr/local/bin/<tool>` wrappers that `docker run` them. The tools that gate the
-images carry the same signed provenance, SBOM, and VEX story as the images they
-gate — and swapping any of them to the FIPS build is one input override (e.g.
-`scout-image: ...:1.23.1-fips`). If a mirror cannot be pulled the install fails
-loudly; it deliberately does **not** fall back to a GitHub release binary,
-because silently changing supply chains is the exact class of failure this
-pipeline exists to prevent. Only `regsync` is still an upstream binary — no DHI
-image exists for it (verified: `dhi.io/regsync` 404s).
+download regctl, docker-scout, cosign, or opa release binaries: the install-tools
+action pulls DHI images and installs transparent `/usr/local/bin/<tool>` wrappers
+that `docker run` them, so the tools that gate the images carry the same signed
+provenance, SBOM, and VEX story as the images they gate. Swapping any of them to
+the FIPS build is one input override (e.g. `scout-image: ...:1.23.1-fips`).
+
+Two sources, deliberately named per tool rather than chained as a fallback:
+
+| Tool | Image | Source |
+|---|---|---|
+| `regctl` | `dhi-regctl:0.11.5` | org mirror |
+| `cosign` | `dhi-cosign:3.1.3` | org mirror |
+| `docker-scout` | `dhi.io/scout-cli:1.23.1` | Docker's DHI registry |
+| `opa` | `dhi.io/open-policy-agent:1.19.1` | Docker's DHI registry |
+| `regsync` | upstream release binary | no DHI image exists (`dhi.io/regsync` 404s) |
+
+The last two come from `dhi.io` because **the org does not mirror them** —
+verified against the live registry, where `<org>/dhi-regctl` lists 72 tags while
+`<org>/dhi-scout-cli` and `<org>/dhi-open-policy-agent` do not exist. They are
+still DHI images with the same attestations, published with
+`com.docker.dhi.entitlement=public`. To move them onto the mirror, run
+`docker dhi mirror start scout-cli` (and `open-policy-agent`) for the org, then
+pass `scout-image` / `opa-image`.
+
+If an image cannot be pulled the install fails loudly. It deliberately does
+**not** fall back — not to a GitHub release binary, and not from the mirror to
+`dhi.io` — because silently changing supply chains is the exact class of failure
+this pipeline exists to prevent.
 
 `docker-scout`, not `docker scout`: the DHI image's entrypoint is the
 `/docker-scout` binary, so it is installed as a standalone command rather than

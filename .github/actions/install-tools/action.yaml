@@ -1,16 +1,20 @@
 name: Install pipeline tools
 description: >-
-  Install the pinned toolchain. regctl, docker-scout, cosign, and opa run FROM
-  THE ORG'S MIRRORED DHI IMAGES (docker.io/<org>/dhi-regctl, dhi-scout-cli,
-  dhi-cosign, dhi-open-policy-agent), not GitHub release binaries: the pipeline's
-  own tools get the same provenance, SBOM, and signed-attestation story as the
-  images they gate, and a -fips variant is one input override away. A thin
+  Install the pinned toolchain. regctl, docker-scout, cosign, and opa all run
+  FROM DOCKER HARDENED IMAGES, not GitHub release binaries: the pipeline's own
+  tools get the same provenance, SBOM, and signed-attestation story as the images
+  they gate, and a -fips variant is one input override away. A thin
   /usr/local/bin/<tool> wrapper docker-runs each image, so every call site (the
-  pipeline library, the stage actions) is unchanged. Only regsync still comes
-  from an upstream release binary -- no DHI image exists for it (verified: 404
-  at dhi.io/regsync). Selection via the `tools` input keeps the scheduled poll
-  cheap: its plan job needs only regctl. (Locally, `make tools` installs via
-  Homebrew on macOS.)
+  pipeline library, the stage actions) is unchanged.
+
+  regctl and cosign come from the ORG MIRROR (docker.io/<org>/dhi-*).
+  docker-scout and opa come from dhi.io, Docker's own DHI registry, because the
+  org does not mirror those two repos -- see the DHI_UPSTREAM comment in the run
+  block for the verification and for how to move them onto the mirror. Only
+  regsync is not a DHI image at all: none exists (verified, dhi.io/regsync 404s).
+
+  Selection via the `tools` input keeps the scheduled poll cheap: its plan job
+  needs only regctl. (Locally, `make tools` installs via Homebrew on macOS.)
 inputs:
   tools:
     description: >-
@@ -30,8 +34,11 @@ inputs:
     default: ""
   scout-image:
     description: >-
-      Image for the docker-scout wrapper. Empty derives
-      docker.io/$DOCKERHUB_ORG/dhi-scout-cli:1.23.1.
+      Image for the docker-scout wrapper. Empty uses dhi.io/scout-cli:1.23.1 --
+      Docker's own DHI registry, NOT the org mirror, because the org does not
+      mirror this repo (see the comment on DHI_UPSTREAM below). Once
+      `docker dhi mirror start scout-cli` has run, set this to
+      docker.io/<org>/dhi-scout-cli:1.23.1.
     required: false
     default: ""
   cosign-image:
@@ -42,8 +49,9 @@ inputs:
     default: ""
   opa-image:
     description: >-
-      Image for the opa wrapper. Empty derives
-      docker.io/$DOCKERHUB_ORG/dhi-open-policy-agent:1.19.1.
+      Image for the opa wrapper. Empty uses
+      dhi.io/open-policy-agent:1.19.1 -- Docker's own DHI registry, not the org
+      mirror, for the same reason as scout-image.
     required: false
     default: ""
   regclient-version:
@@ -154,16 +162,42 @@ runs:
           # (see sync-dhi.yaml / inspect-referrers.yaml); an unauthenticated
           # pull fails below with an error that says exactly that.
           MIRROR="docker.io/${DOCKERHUB_ORG:-nicksdemoorg}"
+
+          # TWO DHI SOURCES, and the split is deliberate rather than sloppy.
+          #
+          # regctl and cosign come from the ORG MIRROR, which is the preferred
+          # path: the org controls it and has entitlement to it. scout-cli and
+          # open-policy-agent come from dhi.io, Docker's own DHI registry,
+          # because THE ORG DOES NOT MIRROR THEM -- verified against the live
+          # registry, where nicksdemoorg/dhi-regctl lists 72 tags while
+          # nicksdemoorg/dhi-scout-cli and .../dhi-open-policy-agent do not
+          # exist at all. Defaulting them to the mirror would make every run
+          # fail at this step.
+          #
+          # These are still Docker Hardened Images, carrying the same signed
+          # provenance and SBOMs; dhi.io publishes them with
+          # com.docker.dhi.entitlement=public, so an anonymous pull works. The
+          # source is named explicitly per tool rather than being a silent
+          # fallback, because a wrapper that quietly changed registries when a
+          # pull failed would change supply chains without changing any visible
+          # outcome -- the same reason there is no fallback to a GitHub release
+          # binary.
+          #
+          # To move them onto the mirror, run `docker dhi mirror start scout-cli`
+          # (and open-policy-agent) for the org, then pass scout-image /
+          # opa-image, or flip these defaults.
+          DHI_UPSTREAM="dhi.io"
+
           want regctl && install_dhi_wrapper regctl "${REGCTL_IMAGE:-$MIRROR/dhi-regctl:0.11.5}"
           # docker-scout, not "scout": the DHI image's entrypoint is the
           # /docker-scout binary, which is the same binary Docker ships as a
           # CLI plugin. It is installed as a standalone command rather than
           # into ~/.docker/cli-plugins, so call sites invoke `docker-scout ...`
           # and never `docker scout ...` -- there is no plugin here to find.
-          want scout  && install_dhi_wrapper docker-scout "${SCOUT_IMAGE:-$MIRROR/dhi-scout-cli:1.23.1}" \
+          want scout  && install_dhi_wrapper docker-scout "${SCOUT_IMAGE:-$DHI_UPSTREAM/scout-cli:1.23.1}" \
                            DOCKER_CONFIG HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
           want cosign && install_dhi_wrapper cosign "${COSIGN_IMAGE:-$MIRROR/dhi-cosign:3.1.3}"
-          want opa    && install_dhi_wrapper opa "${OPA_IMAGE:-$MIRROR/dhi-open-policy-agent:1.19.1}"
+          want opa    && install_dhi_wrapper opa "${OPA_IMAGE:-$DHI_UPSTREAM/open-policy-agent:1.19.1}"
         fi
 
         if want regsync; then
