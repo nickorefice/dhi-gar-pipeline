@@ -5,14 +5,14 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-08-27T18:20:57Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/33102617866)
+Updated: 2026-08-28T19:29:39Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/33203765036)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
-| dhi-node | 26-debian13 | ✅ current | `sha256:df884aceca4af9260805a9a5af72ec7d4253035dec2f13a58a6b37d8718e7892` | `sha256:df884aceca4af9260805a9a5af72ec7d4253035dec2f13a58a6b37d8718e7892` | `sha256:df884aceca4a` | true | — |
-| dhi-node | 24-debian13 | ✅ current | `sha256:187b69dc9cd3d7ba76dd6ba98c3ebe5c106f75307ceaa0f97a8f8cbdbfac22e9` | `sha256:187b69dc9cd3d7ba76dd6ba98c3ebe5c106f75307ceaa0f97a8f8cbdbfac22e9` | `sha256:187b69dc9cd3` | true | — |
+| dhi-node | 26-debian13 | ✅ current | `sha256:3969259793a17c3089b5ba0e2836d308f37fdd11bfae31acd8063e9420c0d8d9` | `sha256:3969259793a17c3089b5ba0e2836d308f37fdd11bfae31acd8063e9420c0d8d9` | `sha256:3969259793a1` | true | — |
+| dhi-node | 24-debian13 | ✅ current | `sha256:2e75b8654cfeb6adddccde5ac2fc5353ea082863a306c50cef878b4a092bd487` | `sha256:2e75b8654cfeb6adddccde5ac2fc5353ea082863a306c50cef878b4a092bd487` | `sha256:2e75b8654cfe` | true | — |
 | dhi-python | 3-debian | ✅ current | `sha256:aaf32d27c5a009dad4e279eb2d9aff2122519610d51e130c8d2729afc4458278` | `sha256:aaf32d27c5a009dad4e279eb2d9aff2122519610d51e130c8d2729afc4458278` | `sha256:aaf32d27c5a0` | true | — |
-| dhi-nvflare | 2-debian13 | ✅ current | `sha256:bf9f30835e1cbdcbbdfbf42de6923e05687185db911944caf00c3204ae1b85b0` | `sha256:bf9f30835e1cbdcbbdfbf42de6923e05687185db911944caf00c3204ae1b85b0` | `sha256:bf9f30835e1c` | true | — |
+| dhi-nvflare | 2-debian13 | ✅ current | `sha256:20ccb501430ec13a0aa8752c75f910d6e8350d34d26e70766f8ac1239e7ed1cf` | `sha256:20ccb501430ec13a0aa8752c75f910d6e8350d34d26e70766f8ac1239e7ed1cf` | `sha256:20ccb501430e` | true | — |
 | dhi-regctl | 0-debian13 | ✅ current | `sha256:1e74bba0dac83433b7ec04683e37619ecbf8c56577761bc4e7b1d38b7b520e0e` | `sha256:1e74bba0dac83433b7ec04683e37619ecbf8c56577761bc4e7b1d38b7b520e0e` | `sha256:1e74bba0dac8` | false | — |
 
 **States:** `current` prod serves the latest upstream digest · `stale` behind
