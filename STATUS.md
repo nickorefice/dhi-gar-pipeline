@@ -5,12 +5,12 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-09-09T12:22:43Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/34350309497)
+Updated: 2026-09-10T12:15:57Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/34475419897)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
-| dhi-node | 26-debian13 | ✅ current | `sha256:892929eed6e0556bd26e8a0ea965b470d728f2562f5ea3442e368cf7157df162` | `sha256:892929eed6e0556bd26e8a0ea965b470d728f2562f5ea3442e368cf7157df162` | `sha256:892929eed6e0` | true | — |
-| dhi-node | 24-debian13 | ✅ current | `sha256:499a967b45c046a93519d2fcbd7e0e165f92ccf25cdee9893cb51980957e2d7c` | `sha256:499a967b45c046a93519d2fcbd7e0e165f92ccf25cdee9893cb51980957e2d7c` | `sha256:499a967b45c0` | true | — |
+| dhi-node | 26-debian13 | ✅ current | `sha256:523343ea122e647ef0d1371c85055b113df63fb8c07395d80c9126a9aa157826` | `sha256:523343ea122e647ef0d1371c85055b113df63fb8c07395d80c9126a9aa157826` | `sha256:523343ea122e` | true | — |
+| dhi-node | 24-debian13 | ✅ current | `sha256:c7b96901db1ae7c4a6518dfbdaa83ba19698ff9f2b3d2084491f45665592fbd7` | `sha256:c7b96901db1ae7c4a6518dfbdaa83ba19698ff9f2b3d2084491f45665592fbd7` | `sha256:c7b96901db1a` | true | — |
 | dhi-python | 3-debian | ✅ current | `sha256:f965b2c477d44c80c2cc6763a9d42617889dcfb5b94b5b4d5e8e38751155322f` | `sha256:f965b2c477d44c80c2cc6763a9d42617889dcfb5b94b5b4d5e8e38751155322f` | `sha256:f965b2c477d4` | true | — |
 | dhi-nvflare | 2-debian13 | ✅ current | `sha256:22f7d7f3c3c0f94a8990955c1c0d9d16d6b7328f5691f9a0b7fb0925ab5aa984` | `sha256:22f7d7f3c3c0f94a8990955c1c0d9d16d6b7328f5691f9a0b7fb0925ab5aa984` | `sha256:22f7d7f3c3c0` | true | — |
 | dhi-regctl | 0-debian13 | ✅ current | `sha256:7efa129486f3f4428e53365b2f74097ea24ea93024550d5b1f5aa02f22fbe07c` | `sha256:7efa129486f3f4428e53365b2f74097ea24ea93024550d5b1f5aa02f22fbe07c` | `sha256:7efa129486f3` | false | — |
