@@ -5,15 +5,15 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-10-23T12:39:40Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/39954489803)
+Updated: 2026-10-24T12:02:41Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/40092012770)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
 | dhi-node | 26-debian13 | ✅ current | `sha256:b8dfd044601fb7b18036370943dad406a2e600f5442356638d8203b2eb3c1f87` | `sha256:b8dfd044601fb7b18036370943dad406a2e600f5442356638d8203b2eb3c1f87` | `sha256:b8dfd044601f` | true | — |
 | dhi-node | 24-debian13 | ✅ current | `sha256:32a2fa6af5209698a9354cef0b19ada3dbfac3090b1010b70afa9f1a298ba2d9` | `sha256:32a2fa6af5209698a9354cef0b19ada3dbfac3090b1010b70afa9f1a298ba2d9` | `sha256:32a2fa6af520` | true | — |
-| dhi-python | 3-debian | ⛔ blocked | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:046a46512297187590b40b85e86ea2b128077d57601847ce916ecb7d919a7291` | `sha256:36c38f4be040` | true | — |
+| dhi-python | 3-debian | ✅ current | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:36c38f4be040` | true | — |
 | dhi-nvflare | 2-debian13 | ⛔ blocked | `sha256:c7e1d4e37499b19ae364820c1fcd84a5e27a459b1483dbc8788afb5cb80bf5e2` | `sha256:a6e7d01bcc8ade4ba485e8ba0965025f6047de607ccf600a045fb14c5996008c` | `sha256:c7e1d4e37499` | true | — |
-| dhi-regctl | 0-debian13 | ✅ current | `sha256:25a983057294007b79884a7284f83c09dbd5ab3b683e4fa6a9338383dd31ec63` | `sha256:25a983057294007b79884a7284f83c09dbd5ab3b683e4fa6a9338383dd31ec63` | `sha256:25a983057294` | false | — |
+| dhi-regctl | 0-debian13 | ✅ current | `sha256:e3b80cf325b26bc702aed173ab6f3bb2b53eccc8a55877270532e40c953b30e6` | `sha256:e3b80cf325b26bc702aed173ab6f3bb2b53eccc8a55877270532e40c953b30e6` | `sha256:e3b80cf325b2` | false | — |
 
 **States:** `current` prod serves the latest upstream digest · `stale` behind
 upstream, the next poll acts · `blocked` synced but a gate refused promotion ·
