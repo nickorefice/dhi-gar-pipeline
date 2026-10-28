@@ -5,14 +5,14 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-10-27T13:13:28Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/40509691294)
+Updated: 2026-10-28T14:02:49Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/40701497307)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
 | dhi-node | 26-debian13 | ✅ current | `sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5b85e033187f` | `sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5b85e033187f` | `sha256:dc87c509f727` | true | — |
 | dhi-node | 24-debian13 | ✅ current | `sha256:5eb921faefd07559999aad0571d9c26eccfc1c7aef8d386dc66481ed8f989cac` | `sha256:5eb921faefd07559999aad0571d9c26eccfc1c7aef8d386dc66481ed8f989cac` | `sha256:5eb921faefd0` | true | — |
-| dhi-python | 3-debian | ⛔ blocked | `sha256:aa13af4b3777149bbf18dc6fe392c5ab9eb097d39715d57f4bacde537b6e0e26` | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:aa13af4b3777` | true | — |
-| dhi-nvflare | 2-debian13 | ⛔ blocked | `sha256:04fe0acdae27dacb992ad7ed5aa978cea363458bf5c7fbd703d16de53f7629be` | `sha256:a6e7d01bcc8ade4ba485e8ba0965025f6047de607ccf600a045fb14c5996008c` | `sha256:04fe0acdae27` | true | — |
+| dhi-python | 3-debian | ⛔ blocked | `sha256:dff2966bc273ff38fae6f84d21180d3265864611b4f805e44695449f11343d72` | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:dff2966bc273` | true | — |
+| dhi-nvflare | 2-debian13 | ✅ current | `sha256:0963f93259d0094295100f19d29462b608c27c36d8d54ca52dfa6f8edc93d26a` | `sha256:0963f93259d0094295100f19d29462b608c27c36d8d54ca52dfa6f8edc93d26a` | `sha256:0963f93259d0` | true | — |
 | dhi-regctl | 0-debian13 | ✅ current | `sha256:a63a0fcdac6e9e2849d62859ea5ea4b0e6a8b792ff000647497a1ad109e4bae3` | `sha256:a63a0fcdac6e9e2849d62859ea5ea4b0e6a8b792ff000647497a1ad109e4bae3` | `sha256:a63a0fcdac6e` | false | — |
 
 **States:** `current` prod serves the latest upstream digest · `stale` behind
