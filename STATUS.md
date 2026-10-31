@@ -5,15 +5,15 @@
 > the registry is authoritative, and verification is only meaningful
 > against the OCI referrers attached to the digests below.
 
-Updated: 2026-10-30T14:08:46Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/41068661792)
+Updated: 2026-10-31T13:40:39Z · [run](https://github.com/nickorefice/dhi-gar-pipeline/actions/runs/41206354594)
 
 | Image | Tag | State | Upstream digest (latest) | Prod digest (served) | Quarantine | VEX req | Hold |
 |---|---|---|---|---|---|---|---|
-| dhi-node | 26-debian13 | ✅ current | `sha256:57a27f9e03b0bef98d39da2860fb0bd6b785a72a58f756f88ef2634ac7526343` | `sha256:57a27f9e03b0bef98d39da2860fb0bd6b785a72a58f756f88ef2634ac7526343` | `sha256:57a27f9e03b0` | true | — |
-| dhi-node | 24-debian13 | ✅ current | `sha256:24fa6258b891ef66e6c3b7ed82daad550b81cdfcd76f6cc64eee4d2478366747` | `sha256:24fa6258b891ef66e6c3b7ed82daad550b81cdfcd76f6cc64eee4d2478366747` | `sha256:24fa6258b891` | true | — |
-| dhi-python | 3-debian | ⛔ blocked | `sha256:6ac87806e8be54b58675cb919c69d597b2b9c097ecb5cd3725d5a0c14219d693` | `sha256:36c38f4be040b095f67fbb0982d18875518f1b58d23b9ad3cc8bc903a7f7524e` | `sha256:6ac87806e8be` | true | — |
-| dhi-nvflare | 2-debian13 | ✅ current | `sha256:d621b017512440eff3df6db4697131765d00c55b98cda6ba6790384e357ddffd` | `sha256:d621b017512440eff3df6db4697131765d00c55b98cda6ba6790384e357ddffd` | `sha256:d621b0175124` | true | — |
-| dhi-regctl | 0-debian13 | ✅ current | `sha256:a63a0fcdac6e9e2849d62859ea5ea4b0e6a8b792ff000647497a1ad109e4bae3` | `sha256:a63a0fcdac6e9e2849d62859ea5ea4b0e6a8b792ff000647497a1ad109e4bae3` | `sha256:a63a0fcdac6e` | false | — |
+| dhi-node | 26-debian13 | ✅ current | `sha256:38c8bbf0ccffd6603b32f602c08b4f407a2a83b010f7371854deaa6e0c2576c4` | `sha256:38c8bbf0ccffd6603b32f602c08b4f407a2a83b010f7371854deaa6e0c2576c4` | `sha256:38c8bbf0ccff` | true | — |
+| dhi-node | 24-debian13 | ✅ current | `sha256:2b299a5ced40c602dda81831007702a9c6ec540c9f367d5582891af9d5ff979c` | `sha256:2b299a5ced40c602dda81831007702a9c6ec540c9f367d5582891af9d5ff979c` | `sha256:2b299a5ced40` | true | — |
+| dhi-python | 3-debian | ✅ current | `sha256:8b0f1de0f2a53209a735cab91d52116938aa38858c24537f454f87bbaa718c5a` | `sha256:8b0f1de0f2a53209a735cab91d52116938aa38858c24537f454f87bbaa718c5a` | `sha256:8b0f1de0f2a5` | true | — |
+| dhi-nvflare | 2-debian13 | ✅ current | `sha256:7dd577c9b728871fc3fbbcca9284f8f117c18529f61ac619096dad7b4215a3e2` | `sha256:7dd577c9b728871fc3fbbcca9284f8f117c18529f61ac619096dad7b4215a3e2` | `sha256:7dd577c9b728` | true | — |
+| dhi-regctl | 0-debian13 | ✅ current | `sha256:370838cabd298dfec3f9d2b769c6c952bcb847de5fb059d7c125bc6b0ee3d886` | `sha256:370838cabd298dfec3f9d2b769c6c952bcb847de5fb059d7c125bc6b0ee3d886` | `sha256:370838cabd29` | false | — |
 
 **States:** `current` prod serves the latest upstream digest · `stale` behind
 upstream, the next poll acts · `blocked` synced but a gate refused promotion ·
